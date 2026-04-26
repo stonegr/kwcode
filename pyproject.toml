@@ -20,6 +20,8 @@ dependencies = [
     "lxml>=5.0.0",
     "trafilatura>=1.12.0",
     "pyyaml>=6.0",
+    "tree-sitter>=0.23.0",
+    "tree-sitter-python>=0.23.0",
 ]
 
 [project.scripts]
