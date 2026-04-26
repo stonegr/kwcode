@@ -1,0 +1,46 @@
+{
+  "status": "completed",
+  "model": "gemma3:4b",
+  "overall_pass": false,
+  "experts": {
+    "TestGenExpert": {
+      "passed": 3,
+      "total": 5,
+      "success_rate": 0.6,
+      "avg_latency_s": 14.12,
+      "threshold_met": false,
+      "tasks": [
+        {
+          "name": "calc_tests",
+          "success": false,
+          "elapsed_s": 29.51,
+          "error": "Max retries (3) exceeded"
+        },
+        {
+          "name": "string_utils_tests",
+          "success": true,
+          "elapsed_s": 3.92,
+          "error": null
+        },
+        {
+          "name": "sort_tests",
+          "success": false,
+          "elapsed_s": 27.8,
+          "error": "Max retries (3) exceeded"
+        },
+        {
+          "name": "filepath_tests",
+          "success": true,
+          "elapsed_s": 4.15,
+          "error": null
+        },
+        {
+          "name": "validator_tests",
+          "success": true,
+          "elapsed_s": 5.24,
+          "error": null
+        }
+      ]
+    }
+  }
+}

@@ -271,7 +271,7 @@ kaiwu/
 - [x] 红线约束代码review（10/10 CORE 全部 PASS）
 - [x] V5 AST Locator验证（A组函数50% vs B组100%，+50pp，AST值得集成）
 - [x] V6 专家生成质量验证（gemma4:e2b 3/3 PASS，gemma3:4b 1/3）
-- [ ] 预置专家20任务验证（Step 16）
+- [x] 预置专家抽样验证（BugFix 5/5=100%, TestGen 3/5=60%，codegen流水线待优化）
 
 ### 已知限制
 
