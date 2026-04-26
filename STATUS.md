@@ -176,11 +176,10 @@ kaiwu/
 - [x] codegen 流水线验证（纯生成通过，但写到 new_code.py 而非目标文件）
 - [x] 拉更大模型验证（gemma4:e2b Gate 100%准确率，E2E通过）
 - [x] Windows 兼容性（GBK编码修复）
-- [ ] Gate codegen/locator_repair 边界优化（"在已有文件添加函数"应走locator_repair）
+- [x] Gate codegen/locator_repair 边界优化（prompt 明确描述，5/5 边界 case 通过）
 - [ ] 非Python语言支持验证（JS/Go/Rust）
 - [ ] 性能优化：reasoning模型thinking开销过大（gemma4 64.9s vs gemma3 5.7s）
 
 ### 已知限制
 
-- Gate 对"在已有文件中添加新函数"可能分类为 codegen 而非 locator_repair，导致跳过 Locator 写到新文件
 - V3 验证脚本的临时目录路径匹配有问题，不影响真实场景

@@ -151,14 +151,19 @@ class LLMBackend:
         self, messages: list[dict], max_tokens: int,
         temperature: float, stop: Optional[list[str]],
     ) -> str:
-        # Reasoning models need extra token budget for thinking
         effective_tokens = max_tokens
         effective_temp = temperature
+        think_enabled = True  # Default: let model think
+
         if self._is_reasoning:
-            effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
-            # Reasoning models at temp=0 can produce empty content in Ollama
-            # due to all tokens being consumed by thinking. Use small temp to
-            # avoid cached empty results while keeping output near-deterministic.
+            # Short-output tasks (Gate, Locator selection) don't need deep reasoning.
+            # Disable thinking to save 50-80% latency on classification tasks.
+            if max_tokens <= 500:
+                think_enabled = False
+                # No multiplier needed when thinking is off
+            else:
+                effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
+
             if temperature == 0.0:
                 effective_temp = 0.01
 
@@ -171,9 +176,13 @@ class LLMBackend:
                 "temperature": effective_temp,
             },
         }
-        # Don't pass stop sequences to reasoning models — they can trigger
-        # inside <think> blocks and truncate before any content is generated.
-        if stop and not self._is_reasoning:
+
+        # Disable thinking for short classification tasks on reasoning models
+        if self._is_reasoning and not think_enabled:
+            payload["think"] = False
+
+        # Don't pass stop sequences to reasoning models with thinking enabled
+        if stop and (not self._is_reasoning or not think_enabled):
             payload["options"]["stop"] = stop
 
         try:
