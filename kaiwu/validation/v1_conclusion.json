@@ -1,0 +1,9 @@
+{
+  "json_parse_rate": 100.0,
+  "expert_type_accuracy": 67.0,
+  "avg_latency_ms": 2308.0,
+  "grammar_used": false,
+  "needs_grammar": false,
+  "total_tests": 100,
+  "errors_count": 0
+}

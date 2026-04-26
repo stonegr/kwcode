@@ -1,0 +1,213 @@
+{
+  "file_accuracy": 90.0,
+  "func_accuracy": 20.0,
+  "trigger_flex2": false,
+  "total_cases": 10,
+  "details": [
+    {
+      "case_id": 1,
+      "file_hit": false,
+      "func_hit": false,
+      "found_files": [
+        "tmpu3wy1t6p/api/main.py",
+        "tmpu3wy1t6p/api/tests/test_api.py",
+        "tmpu3wy1t6p/auth/password.py",
+        "tmpu3wy1t6p/project/main.py",
+        "tmpu3wy1t6p/project/src/config.py"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/auth/password.py",
+        "src/auth/login.py"
+      ],
+      "expected_funcs": [
+        "verify_password"
+      ],
+      "elapsed_s": 2.2
+    },
+    {
+      "case_id": 2,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmpl0fjr3hv/project/main.py",
+        "tmpl0fjr3hv/project/src/api/pagination.py",
+        "tmpl0fjr3hv/tests/test_views.py",
+        "tmpl0fjr3hv/src/api/pagination.py",
+        "tmpl0fjr3hv/db/"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/api/pagination.py",
+        "src/db/queries.py"
+      ],
+      "expected_funcs": [
+        "paginate"
+      ],
+      "elapsed_s": 2.2
+    },
+    {
+      "case_id": 3,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmp0pipevwp/project/config.py",
+        "tmp0pipevwp/src/upload/handler.py",
+        "tmp0pipevwp/upload/upload",
+        "tmp0pipevwp/src/upload/handler.py",
+        "tmp0pipevwp/utils/"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/upload/handler.py",
+        "src/upload/storage.py"
+      ],
+      "expected_funcs": [
+        "handle_upload"
+      ],
+      "elapsed_s": 3.1
+    },
+    {
+      "case_id": 4,
+      "file_hit": true,
+      "func_hit": true,
+      "found_files": [
+        "project/src/config.py",
+        "src/cache/memory_cache.py",
+        "project/src/src/cache/memory_cache.py"
+      ],
+      "found_funcs": [
+        "refresh_cache",
+        "get"
+      ],
+      "expected_files": [
+        "src/cache/memory_cache.py",
+        "src/cache/decorators.py"
+      ],
+      "expected_funcs": [
+        "get"
+      ],
+      "elapsed_s": 7.2
+    },
+    {
+      "case_id": 5,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmpa4gcopi0/project/main.py",
+        "tmpa4gcopi0/websocket/manager.py",
+        "tmpa4gcopi0/src/websocket/manager.py",
+        "tmpa4gcopi0/api/main.py",
+        "tmpa4gcopi0/models/main.py"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/websocket/manager.py",
+        "src/websocket/handlers.py"
+      ],
+      "expected_funcs": [
+        "disconnect"
+      ],
+      "elapsed_s": 3.0
+    },
+    {
+      "case_id": 6,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "project/config.py",
+        "src/src/utils/date_utils.py",
+        "src/src/utils/utils.py",
+        "src/project/src/config.py",
+        "api/models/src/src/utils/date_utils.py"
+      ],
+      "found_funcs": [
+        "convert_date"
+      ],
+      "expected_files": [
+        "src/utils/date_utils.py"
+      ],
+      "expected_funcs": [
+        "parse_date"
+      ],
+      "elapsed_s": 5.4
+    },
+    {
+      "case_id": 7,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmpwtsdjt5o/orders/main.py",
+        "tmpwtsdjt5o/inventory/stock.py",
+        "tmpwtsdjt5o/project/main.py",
+        "tmpwtsdjt5o/src/inventory/stock.py",
+        "tmpwtsdjt5o/src/main.py"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/inventory/stock.py",
+        "src/orders/service.py"
+      ],
+      "expected_funcs": [
+        "deduct_stock"
+      ],
+      "elapsed_s": 2.8
+    },
+    {
+      "case_id": 8,
+      "file_hit": true,
+      "func_hit": true,
+      "found_files": [
+        "project/.env",
+        "project/config.yaml",
+        "src/config/loader.py"
+      ],
+      "found_funcs": [
+        "load_config",
+        "_resolve_env"
+      ],
+      "expected_files": [
+        "src/config/loader.py",
+        "src/config/parser.py"
+      ],
+      "expected_funcs": [
+        "_resolve_env"
+      ],
+      "elapsed_s": 9.4
+    },
+    {
+      "case_id": 9,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmpldt46qq1/project/src/config.py",
+        "tmpldt46qq1/src/notifications/email_sender.py"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/notifications/email_sender.py"
+      ],
+      "expected_funcs": [
+        "send"
+      ],
+      "elapsed_s": 2.6
+    },
+    {
+      "case_id": 10,
+      "file_hit": true,
+      "func_hit": false,
+      "found_files": [
+        "tmpfels0tzn/src/export/csv_exporter.py",
+        "tmpfels0tzn/project/main.py"
+      ],
+      "found_funcs": [],
+      "expected_files": [
+        "src/export/csv_exporter.py"
+      ],
+      "expected_funcs": [
+        "export_csv"
+      ],
+      "elapsed_s": 2.1
+    }
+  ]
+}

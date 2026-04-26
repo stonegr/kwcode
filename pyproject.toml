@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaiwu"
+version = "0.3.0"
+description = "Local-model coding agent with MoE expert pipeline"
+requires-python = ">=3.10"
+
+dependencies = [
+    "llama-cpp-python>=0.2.90",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "gitpython>=3.1.0",
+    "psutil>=5.9.0",
+]
+
+[project.scripts]
+kaiwu = "kaiwu.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kaiwu*"]
