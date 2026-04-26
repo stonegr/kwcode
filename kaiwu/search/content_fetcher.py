@@ -43,10 +43,14 @@ class ContentFetcher:
     def fetch(self, url: str, timeout: float = 8.0) -> str:
         """
         提取单个 URL 的正文，返回压缩后文本（≤800字）。
+        StackOverflow 走 StackExchange API 绕过 403。
         任何异常返回空字符串。
         """
         try:
-            if _CRAWL4AI_OK:
+            # StackOverflow 直接 fetch 会 403，走免费 API 拿 body
+            if "stackoverflow.com/questions/" in url:
+                text = self._fetch_stackoverflow(url, timeout)
+            elif _CRAWL4AI_OK:
                 text = self._fetch_crawl4ai(url, timeout)
             elif _TRAFILATURA_OK:
                 text = self._fetch_trafilatura(url, timeout)
@@ -60,6 +64,48 @@ class ContentFetcher:
     def fetch_many(self, urls: list[str], timeout: float = 8.0) -> list[str]:
         """批量提取，串行执行（MVP 不做并发）。"""
         return [self.fetch(url, timeout) for url in urls]
+
+    @staticmethod
+    def _fetch_stackoverflow(url: str, timeout: float) -> str:
+        """StackOverflow 走 StackExchange API，免费无需 key，直接拿答案 body。"""
+        # 从 URL 提取 question id: stackoverflow.com/questions/12345/...
+        import re as _re
+        match = _re.search(r"stackoverflow\.com/questions/(\d+)", url)
+        if not match:
+            return ""
+        qid = match.group(1)
+
+        try:
+            resp = httpx.get(
+                "https://api.stackexchange.com/2.3/questions/{}/answers".format(qid),
+                params={
+                    "site": "stackoverflow",
+                    "order": "desc",
+                    "sort": "votes",
+                    "filter": "withbody",
+                    "pagesize": 2,
+                },
+                timeout=min(timeout, 5.0),
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+            if not items:
+                return ""
+
+            # 拼接 top 2 答案的 body（HTML），用简单去标签
+            parts = []
+            for item in items[:2]:
+                body = item.get("body", "")
+                text = ContentFetcher._html_to_text(body)
+                if text:
+                    score = item.get("score", 0)
+                    parts.append(f"[votes:{score}] {text}")
+            return "\n\n".join(parts)
+        except Exception as e:
+            logger.warning("[fetcher-so] API failed for %s: %s", qid, e)
+            return ""
 
     @staticmethod
     def _fetch_crawl4ai(url: str, timeout: float) -> str:

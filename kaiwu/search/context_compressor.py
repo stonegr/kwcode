@@ -32,23 +32,22 @@ class ContextCompressor:
     def compress(self, task: str, contents: list[str]) -> str:
         """
         将多个页面正文压缩为一段摘要。
-        内容很短时直接拼接返回，不浪费 LLM 调用。
+        ≤500字直接截断返回，省掉一次 LLM 调用。
         """
         valid = [c for c in contents if c and c.strip()]
         if not valid:
             return ""
 
-        combined = "\n\n---\n\n".join(
-            f"[来源{i + 1}]\n{c}" for i, c in enumerate(valid)
-        )
+        combined = "\n\n".join(valid)
 
-        # 内容本身就很短，不需要压缩
-        if len(combined) < 400:
-            return combined
+        # 内容够短，直接截断返回，不浪费 LLM 调用
+        if len(combined) <= 500:
+            return combined[:400]
 
+        # 内容多才调 LLM 压缩
         prompt = COMPRESS_PROMPT.format(
             task=task,
-            search_results=combined[:3000],  # 截断避免超 context
+            search_results=combined[:3000],
         )
 
         try:
