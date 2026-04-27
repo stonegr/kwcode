@@ -273,6 +273,7 @@ kaiwu/
 - [x] V6 专家生成质量验证（gemma4:e2b 3/3 PASS，gemma3:4b 1/3）
 - [x] 预置专家抽样验证（BugFix 5/5=100%, TestGen gemma4 3/5=60%）
 - [x] CLI补全（--no-search, memory --reset）
+- [x] 中国网络优化（DDG→Bing fallback, httpx代理, ModelScope自动切换, 安装脚本网络探测）
 
 ### 已知限制
 
