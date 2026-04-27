@@ -5,10 +5,13 @@ Provides a unified interface for all expert/gate LLM calls.
 
 import json
 import logging
+import os
 import re
 from typing import Optional
 
 import httpx
+
+from kaiwu.core.network import is_china_network
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,14 @@ class LLMBackend:
     REASONING_MODELS = {"deepseek-r1", "qwq", "qwen3", "gemma4"}  # thinking/reasoning models
     # Multiplier for num_predict when using reasoning models
     REASONING_TOKEN_MULTIPLIER = 8
+
+    # ModelScope model mapping for China network auto-switching
+    MODELSCOPE_MODELS = {
+        "deepseek-r1:8b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-8B",
+        "qwen3:8b": "Qwen/Qwen3-8B",
+        "qwen3:14b": "Qwen/Qwen3-14B",
+        "gemma3:4b": "google/gemma-3-4b-it",
+    }
 
     def __init__(
         self,
@@ -68,6 +79,42 @@ class LLMBackend:
     @property
     def mode(self) -> str:
         return self._mode
+
+    def ensure_model_available(self) -> None:
+        """Check if model is pulled in Ollama; auto-switch to ModelScope on China networks."""
+        if self._mode != "ollama":
+            return
+
+        # Query Ollama for available models
+        try:
+            resp = httpx.get(f"{self.ollama_url}/api/tags", timeout=10.0)
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+        except Exception as e:
+            logger.warning("无法查询 Ollama 模型列表: %s", e)
+            return
+
+        # Check if current model is already available
+        # Ollama tags list includes full "name:tag" entries; match exactly or
+        # treat a tagless request (e.g. "qwen3") as matching "qwen3:latest".
+        target = self.ollama_model
+        for m in models:
+            if m == target or m == f"{target}:latest":
+                logger.debug("模型 %s 已存在于 Ollama", self.ollama_model)
+                return
+
+        # Model not found — try ModelScope if on China network
+        if self.ollama_model not in self.MODELSCOPE_MODELS:
+            logger.info("模型 %s 未找到，且不在 ModelScope 映射表中，跳过自动切换", self.ollama_model)
+            return
+
+        if not is_china_network():
+            logger.debug("模型 %s 未找到，非国内网络，使用默认源拉取", self.ollama_model)
+            return
+
+        logger.info("模型未找到，检测到国内网络，尝试从 ModelScope 拉取...")
+        os.environ["OLLAMA_MODELS"] = "https://modelscope.cn/models"
+        logger.info("已设置 OLLAMA_MODELS=%s", os.environ["OLLAMA_MODELS"])
 
     def generate(
         self,

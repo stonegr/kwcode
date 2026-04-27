@@ -135,9 +135,15 @@ if ($ollamaOk) {
     }
 
     # 检查 ModelScope 镜像（国内加速）
-    if (-not $env:OLLAMA_MODELS) {
-        Write-Info "提示: 国内下载慢可设置 ModelScope 镜像加速"
-        Write-Info '  $env:OLLAMA_MODELS="https://modelscope.cn/models"'
+    Write-Step "检测模型下载源..."
+    $hfOk = $false
+    try {
+        $r = Invoke-WebRequest -Uri "https://huggingface.co" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+        $hfOk = $true
+        Write-Info "HuggingFace 可达，使用默认源"
+    } catch {
+        Write-Warn "HuggingFace 不可达，自动切换到 ModelScope"
+        $env:OLLAMA_MODELS = "https://modelscope.cn/models"
     }
 
     Write-Info "正在拉取 $model（首次下载可能需要几分钟）..."

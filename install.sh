@@ -167,10 +167,13 @@ if [ "$OLLAMA_OK" -eq 1 ]; then
         fi
     fi
 
-    # ModelScope 镜像提示
-    if [ -z "$OLLAMA_MODELS" ]; then
-        info "提示: 国内下载慢可设置 ModelScope 镜像加速"
-        info '  export OLLAMA_MODELS="https://modelscope.cn/models"'
+    # 检测模型下载源
+    step "检测模型下载源..."
+    if curl -s --max-time 5 https://huggingface.co > /dev/null 2>&1; then
+        info "HuggingFace 可达，使用默认源"
+    else
+        warn "HuggingFace 不可达，自动切换到 ModelScope"
+        export OLLAMA_MODELS="https://modelscope.cn/models"
     fi
 
     info "正在拉取 $MODEL（首次下载可能需要几分钟）..."

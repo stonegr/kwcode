@@ -58,6 +58,7 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     from kaiwu.llm.llama_backend import LLMBackend
     from kaiwu.core.gate import Gate
     from kaiwu.core.orchestrator import PipelineOrchestrator
+    from kaiwu.core.network import detect_network
     from kaiwu.experts.locator import LocatorExpert
     from kaiwu.experts.generator import GeneratorExpert
     from kaiwu.experts.verifier import VerifierExpert
@@ -67,6 +68,12 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     from kaiwu.memory.kaiwu_md import KaiwuMemory
     from kaiwu.registry import ExpertRegistry
     from kaiwu.flywheel.trajectory_collector import TrajectoryCollector
+
+    # 网络探测（首次调用，缓存结果）
+    net = detect_network()
+    if net["china"]:
+        proxy_hint = f"代理: {net['proxy']}" if net["proxy"] else "配置代理可加速: export KAIWU_PROXY=http://..."
+        console.print(f"  [yellow][网络] 国内网络，搜索已启用 Bing fallback。{proxy_hint}[/yellow]")
 
     llm = LLMBackend(
         model_path=model_path,

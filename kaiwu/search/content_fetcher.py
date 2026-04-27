@@ -10,7 +10,11 @@ from typing import Optional
 
 import httpx
 
+from kaiwu.core.network import get_httpx_kwargs, get_proxy
+
 logger = logging.getLogger(__name__)
+
+_UA = {"User-Agent": "Mozilla/5.0 (compatible; Kaiwu/0.3)"}
 
 # 检测可用的正文提取库
 _CRAWL4AI_OK = False
@@ -76,6 +80,7 @@ class ContentFetcher:
         qid = match.group(1)
 
         try:
+            kwargs = get_httpx_kwargs(min(timeout, 5.0))
             resp = httpx.get(
                 "https://api.stackexchange.com/2.3/questions/{}/answers".format(qid),
                 params={
@@ -85,8 +90,7 @@ class ContentFetcher:
                     "filter": "withbody",
                     "pagesize": 2,
                 },
-                timeout=min(timeout, 5.0),
-                follow_redirects=True,
+                **kwargs,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -130,14 +134,11 @@ class ContentFetcher:
 
     @staticmethod
     def _fetch_trafilatura(url: str, timeout: float) -> str:
-        """trafilatura 提取（纯 HTTP，质量好）。用 httpx 自己下载以控制超时。"""
+        """trafilatura 提取（纯 HTTP，质量好）。用 httpx 自己下载以控制超时和代理。"""
         try:
-            resp = httpx.get(
-                url,
-                timeout=min(timeout, 5.0),
-                follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; Kaiwu/0.3)"},
-            )
+            kwargs = get_httpx_kwargs(min(timeout, 5.0))
+            kwargs["headers"] = _UA
+            resp = httpx.get(url, **kwargs)
             resp.raise_for_status()
             downloaded = resp.text
         except Exception as e:
@@ -155,12 +156,9 @@ class ContentFetcher:
     def _fetch_httpx(url: str, timeout: float) -> str:
         """httpx 降级：下载 HTML 后简单去标签。"""
         try:
-            resp = httpx.get(
-                url,
-                timeout=timeout,
-                follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; Kaiwu/0.3)"},
-            )
+            kwargs = get_httpx_kwargs(timeout)
+            kwargs["headers"] = _UA
+            resp = httpx.get(url, **kwargs)
             resp.raise_for_status()
             return ContentFetcher._html_to_text(resp.text)
         except Exception as e:
