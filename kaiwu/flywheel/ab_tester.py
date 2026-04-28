@@ -2,18 +2,24 @@
 AB tester: three-gate expert validation system (spec §5.1).
 
 Gate 1: Quantity check (handled by PatternDetector — >=5 successful same-type tasks)
-Gate 2: Backtest against original trajectories
-Gate 3: Production AB test (10 tasks: 5 new vs 5 baseline)
+Gate 2: Backtest — replay source trajectories' tasks through new expert pipeline,
+        new expert success_rate must >= baseline (source trajectories' rate).
+Gate 3: Production AB test (10 real tasks: 5 new vs 5 baseline, new must beat by >10%)
 """
 
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
+from typing import Optional, TYPE_CHECKING
 
 from kaiwu.flywheel.trajectory_collector import TrajectoryCollector, TaskTrajectory
 from kaiwu.registry.expert_registry import ExpertRegistry
 from kaiwu.registry.expert_loader import ExpertLoader
+
+if TYPE_CHECKING:
+    from kaiwu.core.orchestrator import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +29,15 @@ CANDIDATES_DIR = os.path.join(Path.home(), ".kaiwu", "candidates")
 class ABTester:
     """Three-gate expert validation system."""
 
-    def __init__(self, registry: ExpertRegistry, collector: TrajectoryCollector):
+    def __init__(
+        self,
+        registry: ExpertRegistry,
+        collector: TrajectoryCollector,
+        orchestrator: "PipelineOrchestrator | None" = None,
+    ):
         self.registry = registry
         self.collector = collector
+        self.orchestrator = orchestrator  # needed for gate 2 backtest
         self._candidates: dict[str, dict] = {}  # expert_name -> candidate info
         self._load_candidates()
 
@@ -34,10 +46,11 @@ class ABTester:
         Submit a generated expert for gate 2 (backtest).
         Gate 1 (quantity) was already passed by PatternDetector.
 
-        Gate 2: Backtest validation (simplified for MVP)
-        - Validate YAML structure is correct
-        - Pipeline matches the source trajectories' pipeline
-        - Both conditions met -> enters candidate pool for gate 3
+        Gate 2: Real backtest validation
+        - Validate YAML structure
+        - Replay each source trajectory's task through the new expert's pipeline
+        - Compare: new expert success_rate must >= baseline success_rate
+        - Only then enters candidate pool for gate 3
         """
         name = expert_def["name"]
 
@@ -47,33 +60,121 @@ class ABTester:
             logger.warning("Gate 2 failed for %s: validation error: %s", name, err)
             return
 
-        # Gate 2b: Pipeline must match source trajectories
-        source_pipeline = source_trajectories[0].pipeline_steps if source_trajectories else []
-        if expert_def.get("pipeline") != source_pipeline:
-            logger.warning(
-                "Gate 2 failed for %s: pipeline mismatch (expert=%s, source=%s)",
-                name, expert_def.get("pipeline"), source_pipeline,
-            )
-            return
-
-        # Gate 2c: Compute baseline stats from source trajectories
+        # Gate 2b: Compute baseline stats from source trajectories
+        baseline_successes = sum(1 for t in source_trajectories if t.success)
+        baseline_total = len(source_trajectories)
+        baseline_sr = baseline_successes / max(baseline_total, 1)
         baseline_latency = (
-            sum(t.latency_s for t in source_trajectories) / len(source_trajectories)
-            if source_trajectories else 0.0
+            sum(t.latency_s for t in source_trajectories) / baseline_total
+            if baseline_total > 0 else 0.0
         )
 
+        # Gate 2c: Real backtest — replay source tasks through new expert pipeline
+        backtest_results = self._run_backtest(expert_def, source_trajectories)
+        backtest_successes = sum(1 for r in backtest_results if r["success"])
+        backtest_total = len(backtest_results)
+        backtest_sr = backtest_successes / max(backtest_total, 1)
+
+        logger.info(
+            "Gate 2 backtest for %s: new_sr=%.0f%% (%d/%d) vs baseline_sr=%.0f%% (%d/%d)",
+            name, backtest_sr * 100, backtest_successes, backtest_total,
+            baseline_sr * 100, baseline_successes, baseline_total,
+        )
+
+        # Gate 2 pass condition: new expert >= baseline
+        if backtest_sr < baseline_sr:
+            logger.warning(
+                "Gate 2 FAILED for %s: backtest %.0f%% < baseline %.0f%%",
+                name, backtest_sr * 100, baseline_sr * 100,
+            )
+            # Save as failed candidate for diagnostics
+            self._candidates[name] = {
+                "expert_def": expert_def,
+                "gate2_passed": False,
+                "gate2_backtest": backtest_results,
+                "backtest_success_rate": round(backtest_sr, 4),
+                "baseline_success_rate": round(baseline_sr, 4),
+                "baseline_avg_latency": round(baseline_latency, 2),
+                "ab_results": [],
+                "status": "gate2_failed",
+            }
+            self._save_candidates()
+            return
+
+        # Gate 2 passed — enter AB testing pool for gate 3
         candidate = {
             "expert_def": expert_def,
             "gate2_passed": True,
-            "baseline_success_rate": 1.0,  # All source trajectories were successful
+            "gate2_backtest": backtest_results,
+            "backtest_success_rate": round(backtest_sr, 4),
+            "baseline_success_rate": round(baseline_sr, 4),
             "baseline_avg_latency": round(baseline_latency, 2),
-            "ab_results": [],  # gate 3 results
-            "status": "ab_testing",  # ab_testing | graduated | archived
+            "ab_results": [],  # gate 3 results filled by real tasks
+            "status": "ab_testing",
         }
         self._candidates[name] = candidate
         self._save_candidates()
 
-        logger.info("Gate 2 passed for %s. Entering AB test pool.", name)
+        logger.info("Gate 2 PASSED for %s (backtest %.0f%% >= baseline %.0f%%). Entering AB test pool.",
+                     name, backtest_sr * 100, baseline_sr * 100)
+
+    def _run_backtest(self, expert_def: dict, source_trajectories: list[TaskTrajectory]) -> list[dict]:
+        """
+        Replay source trajectories' tasks through the new expert's pipeline.
+        Returns list of {"task": str, "success": bool, "latency": float, "error": str|None}.
+
+        If orchestrator is not available (e.g. unit test), returns empty list
+        which causes gate 2 to fail (backtest_sr=0 < baseline_sr>0).
+        """
+        if not self.orchestrator:
+            logger.warning("Gate 2 backtest skipped: no orchestrator available. Gate 2 will fail.")
+            return []
+
+        results = []
+        for traj in source_trajectories:
+            # Build a gate_result that forces the new expert's pipeline
+            gate_result = {
+                "expert_type": expert_def.get("type", traj.expert_used),
+                "expert_name": expert_def["name"],
+                "task_summary": traj.gate_result.get("task_summary", ""),
+                "difficulty": traj.gate_result.get("difficulty", "easy"),
+                "route_type": "expert_registry",
+                "pipeline": expert_def.get("pipeline", traj.pipeline_steps),
+                "system_prompt": expert_def.get("system_prompt", ""),
+            }
+
+            # Use the original project (from trajectory's project_hash we can't recover
+            # the path, so we use the orchestrator's current project or a temp dir)
+            project_root = getattr(self.orchestrator, '_backtest_project_root', None)
+            if not project_root:
+                # Fallback: use a temp dir (backtest won't have real files,
+                # but verifier can still check syntax)
+                project_root = tempfile.mkdtemp(prefix="kwcode_backtest_")
+
+            try:
+                result = self.orchestrator.run(
+                    user_input=traj.user_input,
+                    gate_result=gate_result,
+                    project_root=project_root,
+                    on_status=None,  # silent
+                    no_search=True,  # backtest doesn't need search
+                )
+                results.append({
+                    "task": traj.user_input[:200],
+                    "success": result["success"],
+                    "latency": round(result.get("elapsed", 0), 2),
+                    "error": result.get("error"),
+                })
+            except Exception as e:
+                logger.warning("Backtest task failed with exception: %s", e)
+                results.append({
+                    "task": traj.user_input[:200],
+                    "success": False,
+                    "latency": 0.0,
+                    "error": str(e),
+                })
+
+        return results
 
     def get_candidate_status(self, expert_name: str) -> dict | None:
         """Get current status of a candidate expert."""
@@ -123,10 +224,15 @@ class ABTester:
         })
         self._save_candidates()
 
-        logger.debug(
+        total = len(candidate["ab_results"])
+        logger.info(
             "AB result for %s: used_new=%s success=%s (%d/10)",
-            expert_name, used_new, success, len(candidate["ab_results"]),
+            expert_name, used_new, success, total,
         )
+
+        # Auto-check graduation when we have 10 results
+        if total >= 10:
+            self.check_graduation(expert_name)
 
     def check_graduation(self, expert_name: str) -> str:
         """
@@ -161,16 +267,34 @@ class ABTester:
             candidate["status"] = "graduated"
             self._save_candidates()
             logger.info(
-                "Expert %s graduated! new_sr=%.0f%% baseline_sr=%.0f%%",
+                "Gate 3 PASSED — Expert %s graduated! new_sr=%.0f%% baseline_sr=%.0f%%",
                 expert_name, new_sr * 100, baseline_sr * 100,
             )
+            # P2: Queue flywheel notification for expert graduation
+            try:
+                from kaiwu.notification.flywheel_notifier import FlywheelNotifier
+                notifier = FlywheelNotifier()
+                new_latencies = [r["latency"] for r in new_results if r["success"]]
+                baseline_latencies = [r["latency"] for r in baseline_results if r["success"]]
+                notifier.queue_expert_born(
+                    expert_def=expert_def,
+                    metrics={
+                        "task_count": len(results),
+                        "success_rate_new": new_sr,
+                        "success_rate_baseline": baseline_sr,
+                        "avg_latency_new": sum(new_latencies) / len(new_latencies) if new_latencies else 0,
+                        "avg_latency_baseline": sum(baseline_latencies) / len(baseline_latencies) if baseline_latencies else 0,
+                    },
+                )
+            except Exception as e:
+                logger.debug("Flywheel notification failed (non-blocking): %s", e)
             return "graduated"
 
         # Failed gate 3 -> archive
         candidate["status"] = "archived"
         self._save_candidates()
         logger.info(
-            "Expert %s archived. new_sr=%.0f%% baseline_sr=%.0f%% (needed +10%%)",
+            "Gate 3 FAILED — Expert %s archived. new_sr=%.0f%% baseline_sr=%.0f%% (needed +10%%)",
             expert_name, new_sr * 100, baseline_sr * 100,
         )
         return "archived"
@@ -181,12 +305,13 @@ class ABTester:
         """Persist candidate state to disk."""
         os.makedirs(CANDIDATES_DIR, exist_ok=True)
         path = os.path.join(CANDIDATES_DIR, "candidates.json")
-        # Serialize: strip non-serializable fields
         data = {}
         for name, info in self._candidates.items():
             data[name] = {
                 "expert_def": info["expert_def"],
                 "gate2_passed": info["gate2_passed"],
+                "gate2_backtest": info.get("gate2_backtest", []),
+                "backtest_success_rate": info.get("backtest_success_rate", 0.0),
                 "baseline_success_rate": info["baseline_success_rate"],
                 "baseline_avg_latency": info["baseline_avg_latency"],
                 "ab_results": info["ab_results"],

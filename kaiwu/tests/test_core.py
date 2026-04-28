@@ -55,8 +55,8 @@ class TestGate:
         })
         gate = Gate(llm=llm)
         result = gate.classify("测试一下")
-        # Should fallback to locator_repair/easy
-        assert result["expert_type"] == "locator_repair"
+        # Should fallback to chat/easy (Gate parse failure → chat降级)
+        assert result["expert_type"] == "chat"
         assert result["difficulty"] == "easy"
         assert "_parse_error" in result
 
@@ -67,7 +67,7 @@ class TestGate:
         })
         gate = Gate(llm=llm)
         result = gate.classify("帮我写诗")
-        assert result["expert_type"] == "locator_repair"  # fallback
+        assert result["expert_type"] == "chat"  # fallback
         assert "_parse_error" in result
 
     def test_classify_json_wrapped_in_text(self):
@@ -379,7 +379,7 @@ class TestExpertSequences:
         assert EXPERT_SEQUENCES["locator_repair"] == ["locator", "generator", "verifier"]
         assert EXPERT_SEQUENCES["codegen"] == ["generator", "verifier"]
         assert EXPERT_SEQUENCES["refactor"] == ["locator", "generator", "verifier"]
-        assert EXPERT_SEQUENCES["doc"] == ["generator"]
+        assert EXPERT_SEQUENCES["doc"] == ["locator", "generator"]
         assert EXPERT_SEQUENCES["office"] == ["office"]
 
 
@@ -402,6 +402,114 @@ class TestContext:
         ctx2 = TaskContext(user_input="task2")
         ctx1.locator_output = {"files": ["a.py"]}
         assert ctx2.locator_output is None  # Independent
+
+
+# ── Test Generator filename extraction ───────────────────────
+
+class TestExtractFilename:
+    def _extract(self, user_input):
+        from kaiwu.experts.generator import GeneratorExpert
+        return GeneratorExpert._extract_filename(user_input)
+
+    def test_explicit_filename(self):
+        assert self._extract("帮我写个 login.py") == "login.py"
+        assert self._extract("create server.js for me") == "server.js"
+        assert self._extract("生成 config.yaml") == "config.yaml"
+
+    def test_explicit_filename_with_path(self):
+        # Should extract just the filename part from the regex
+        result = self._extract("写个 utils.py 工具函数")
+        assert result == "utils.py"
+
+    def test_chinese_codegen_pattern(self):
+        # English name after Chinese verb → extracted
+        assert self._extract("写个sort函数") == "sort.py"
+        assert self._extract("写一个calculator类") == "calculator.py"
+
+    def test_english_create_pattern(self):
+        assert self._extract("create a calculator") == "calculator.py"
+        assert self._extract("write a parser") == "parser.py"
+        assert self._extract("generate a scheduler") == "scheduler.py"
+
+    def test_skip_generic_words(self):
+        # "create a new function" → "new" and "function" are generic, fall through
+        result = self._extract("create a new function")
+        # Should not be "new.py" or "function.py"
+        assert result == "output.py"
+
+    def test_fallback_to_output(self):
+        assert self._extract("帮我写段代码") == "output.py"
+        assert self._extract("随便写点什么") == "output.py"
+
+    def test_multiple_extensions(self):
+        assert self._extract("写 main.go") == "main.go"
+        assert self._extract("create index.html") == "index.html"
+        assert self._extract("生成 Makefile.sh") == "Makefile.sh"
+
+    def test_language_detection_html(self):
+        # "写个HTML页面" → should detect .html extension
+        assert self._extract("帮我写个html页面").endswith(".html")
+        assert self._extract("写一个网页").endswith(".html")
+
+    def test_language_detection_js(self):
+        assert self._extract("写个javascript函数").endswith(".js")
+
+    def test_language_detection_shell(self):
+        assert self._extract("写个shell脚本").endswith(".sh")
+        assert self._extract("写个bash脚本").endswith(".sh")
+
+
+class TestCleanCodeOutput:
+    def test_strip_tool_call_lines(self):
+        from kaiwu.experts.generator import GeneratorExpert
+        raw = "write_file output.html\n<html>\n<body>hello</body>\n</html>"
+        result = GeneratorExpert._clean_code_output(raw)
+        assert "write_file" not in result
+        assert "<html>" in result
+
+    def test_strip_markdown_blocks(self):
+        from kaiwu.experts.generator import GeneratorExpert
+        raw = "```html\n<h1>hello</h1>\n```"
+        result = GeneratorExpert._clean_code_output(raw)
+        assert "```" not in result
+        assert "<h1>hello</h1>" in result
+
+
+class TestCodegenOutput:
+    """Test that _run_codegen uses real filename instead of new_code.py."""
+
+    def test_codegen_uses_extracted_filename(self):
+        from kaiwu.experts.generator import GeneratorExpert
+        from kaiwu.core.context import TaskContext
+
+        llm = MockLLM({"生成": "def hello():\n    print('hello')"})
+        gen = GeneratorExpert(llm=llm, num_candidates=1)
+
+        ctx = TaskContext(
+            user_input="写个 hello.py",
+            project_root="/tmp/test_project",
+            gate_result={"expert_type": "codegen"},
+        )
+        result = gen._run_codegen(ctx)
+        assert result is not None
+        assert result["patches"][0]["file"] == "hello.py"
+        assert "hello.py" in result["explanation"]
+
+    def test_codegen_fallback_filename(self):
+        from kaiwu.experts.generator import GeneratorExpert
+        from kaiwu.core.context import TaskContext
+
+        llm = MockLLM({"生成": "x = 1"})
+        gen = GeneratorExpert(llm=llm, num_candidates=1)
+
+        ctx = TaskContext(
+            user_input="帮我写段代码",
+            project_root="/tmp/test_project",
+            gate_result={"expert_type": "codegen"},
+        )
+        result = gen._run_codegen(ctx)
+        assert result is not None
+        assert result["patches"][0]["file"] == "output.py"
 
 
 if __name__ == "__main__":

@@ -1,0 +1,193 @@
+"""
+Context Pruner：纯算法上下文压缩，不调用LLM。
+UI-RED-2：耗时必须 <5ms。
+
+策略：
+  保留头部（system + 首轮）+ 保留尾部（最近8K tokens）
+  中间部分：tool输出提取关键词，其余掩码
+"""
+
+import re
+import time
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# 关键词提取正则（编译一次，重复使用）
+_PATTERNS = [
+    re.compile(r'(?:^|\s)((?:\w+/)+\w+\.\w+)'),           # 文件路径
+    re.compile(r'\bdef\s+(\w+)\s*\('),                      # Python函数
+    re.compile(r'\bfunction\s+(\w+)\s*[\(\{]'),             # JS函数
+    re.compile(r'\bfunc\s+(\w+)\s*\('),                     # Go函数
+    re.compile(r'\bclass\s+(\w+)[\s:\(]'),                  # 类名
+    re.compile(r'(?:TODO|FIXME|BUG|HACK|NOTE):\s*(.{0,60})'),  # 注释标记
+    re.compile(r'(?:Error|Exception|Traceback)[:\s]+(.{0,80})'), # 错误信息
+    re.compile(r'(?:line\s+|L)(\d+)'),                      # 行号
+    re.compile(r'^(?:import|from)\s+\S+', re.MULTILINE),    # import语句
+]
+
+_TAIL_TOKENS = 8192   # 尾部保留token数
+_MASK_MIN = 200       # 短于此token数不掩码
+_HEAD_TURNS = 1       # 保留头部的对话轮数（1=首轮问答）
+
+
+def _count_tokens(text: str) -> int:
+    """粗估token数，复用旧版逻辑。中文1.5字/token，英文4字符/token。"""
+    cn = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    en = len(text) - cn
+    return int(cn * 1.5 + en / 4)
+
+
+def _extract_keywords(text: str) -> str:
+    """从文本中提取关键词/路径/函数名，拼成一行摘要。"""
+    hits = []
+    for pat in _PATTERNS:
+        for m in pat.finditer(text):
+            # 取第一个捕获组（如果有），否则取全匹配
+            val = m.group(1) if m.lastindex else m.group(0)
+            val = val.strip()
+            if val and len(val) > 2:
+                hits.append(val)
+
+    if not hits:
+        return ""
+
+    # 去重保序，限制长度
+    seen = set()
+    unique = []
+    for h in hits:
+        if h not in seen:
+            seen.add(h)
+            unique.append(h)
+        if len(unique) >= 15:
+            break
+
+    return "[摘要] " + " · ".join(unique)
+
+
+class ContextPruner:
+    """
+    对话历史压缩器。
+    调用 prune(messages) 返回压缩后的消息列表。
+    """
+
+    def __init__(self, max_tokens: int = 8192, tail_tokens: int = _TAIL_TOKENS):
+        self.max_tokens = max_tokens
+        self.tail_tokens = min(tail_tokens, max_tokens * 3 // 4)
+        self.compress_count = 0      # 累计压缩次数（显示在状态栏）
+        self._last_compress_ms = 0.0 # 上次压缩耗时
+
+    def estimate_total(self, messages: list[dict]) -> int:
+        """估算消息列表的总token数。"""
+        return sum(_count_tokens(m.get("content", "")) for m in messages)
+
+    def needs_pruning(self, messages: list[dict]) -> bool:
+        """是否需要压缩：超过max_tokens的85%时触发。"""
+        return self.estimate_total(messages) > self.max_tokens * 0.85
+
+    def prune(self, messages: list[dict]) -> list[dict]:
+        """
+        压缩消息列表。返回压缩后的副本，不修改原列表。
+
+        压缩流程：
+          1. 分离头部（system + 前_HEAD_TURNS轮）
+          2. 分离尾部（最近tail_tokens tokens）
+          3. 中间部分：tool输出提取关键词，assistant长输出截断+关键词
+          4. 合并返回
+        """
+        t0 = time.perf_counter()
+
+        if not messages:
+            return messages
+
+        # ── 分离头部 ──
+        head = []
+        rest = list(messages)
+
+        # system消息
+        if rest and rest[0].get("role") == "system":
+            head.append(rest.pop(0))
+
+        # 首轮对话（_HEAD_TURNS轮 = user+assistant各一条）
+        turns_kept = 0
+        while rest and turns_kept < _HEAD_TURNS:
+            if rest[0].get("role") == "user":
+                head.append(rest.pop(0))
+                if rest and rest[0].get("role") == "assistant":
+                    head.append(rest.pop(0))
+                turns_kept += 1
+            else:
+                break
+
+        # ── 分离尾部 ──
+        tail = []
+        tail_tokens_acc = 0
+        temp = list(reversed(rest))
+        tail_raw = []
+        for msg in temp:
+            t = _count_tokens(msg.get("content", ""))
+            if tail_tokens_acc + t > self.tail_tokens:
+                break
+            tail_raw.append(msg)
+            tail_tokens_acc += t
+        tail = list(reversed(tail_raw))
+        middle = rest[:len(rest) - len(tail)]
+
+        # ── 压缩中间部分 ──
+        compressed_middle = []
+        for msg in middle:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            tokens = _count_tokens(content)
+
+            if tokens < _MASK_MIN:
+                # 短内容不压缩
+                compressed_middle.append(msg)
+                continue
+
+            if role == "tool":
+                # tool输出：提取关键词
+                keywords = _extract_keywords(content)
+                if keywords:
+                    compressed_middle.append({**msg, "content": keywords})
+                else:
+                    compressed_middle.append({
+                        **msg,
+                        "content": f"[output masked, {tokens} tokens]"
+                    })
+
+            elif role == "assistant":
+                # assistant输出：保留前200字 + 关键词
+                preview = content[:200].rstrip()
+                keywords = _extract_keywords(content)
+                summary = preview
+                if keywords:
+                    summary += "\n" + keywords
+                compressed_middle.append({**msg, "content": summary})
+
+            else:
+                # user消息：保留（用户输入通常较短）
+                compressed_middle.append(msg)
+
+        result = head + compressed_middle + tail
+
+        # ── 统计 ──
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        self._last_compress_ms = elapsed_ms
+        self.compress_count += 1
+
+        orig_tokens = self.estimate_total(messages)
+        new_tokens = self.estimate_total(result)
+        ratio = (1 - new_tokens / max(orig_tokens, 1)) * 100
+
+        logger.info(
+            "[pruner] 压缩完成 %.0f%%，%d→%d tokens，耗时 %.2fms（第%d次）",
+            ratio, orig_tokens, new_tokens, elapsed_ms, self.compress_count
+        )
+
+        # UI-RED-2检查（>5ms警告，不报错）
+        if elapsed_ms > 5:
+            logger.warning("[pruner] 耗时 %.2fms 超过5ms红线", elapsed_ms)
+
+        return result

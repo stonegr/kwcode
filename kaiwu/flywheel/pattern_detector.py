@@ -49,6 +49,9 @@ class PatternDetector:
             # Filter to successful only
             successful = [t for t in trajs if t.success]
             if len(successful) < MIN_PATTERN_COUNT:
+                # P2: Queue progress notification for accumulation (3/5, 4/5)
+                if len(successful) >= 3:
+                    self._notify_progress(expert_type, len(successful))
                 continue
 
             # Check all successful trajectories share the same pipeline
@@ -93,6 +96,16 @@ class PatternDetector:
         for t in trajs:
             groups[_pipeline_key(t.pipeline_steps)].append(t)
         return groups
+
+    @staticmethod
+    def _notify_progress(expert_type: str, current: int):
+        """P2: Queue flywheel progress notification (non-blocking)."""
+        try:
+            from kaiwu.notification.flywheel_notifier import FlywheelNotifier
+            notifier = FlywheelNotifier()
+            notifier.queue_progress(expert_type, current, MIN_PATTERN_COUNT)
+        except Exception:
+            pass  # Non-blocking
 
 
 def _pipeline_key(steps: list[str]) -> str:

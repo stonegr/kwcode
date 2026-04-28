@@ -147,7 +147,8 @@ class VerifierExpert:
 
         # Check if tests directory exists
         test_dirs = self.tools.list_dir(ctx.project_root)
-        has_tests = "tests" in test_dirs or "test" in test_dirs
+        # list_dir returns ["[ERROR] ..."] on failure — treat as no tests
+        has_tests = any(d in ("tests", "test") for d in test_dirs if not d.startswith("[ERROR]"))
         if not has_tests:
             return 0, 0, ""  # No tests to run
 

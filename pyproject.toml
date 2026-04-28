@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kaiwu"
-version = "0.4.0"
-description = "KwQode - Local-model coding agent with MoE expert pipeline"
+name = "kwcode"
+version = "0.7.0"
+description = "KwCode - Local-model coding agent with MoE expert pipeline"
 requires-python = ">=3.10"
 
 dependencies = [
@@ -22,10 +22,14 @@ dependencies = [
     "pyyaml>=6.0",
     "tree-sitter>=0.23.0",
     "tree-sitter-python>=0.23.0",
+    "networkx>=3.0",
+    "rank-bm25>=0.2.2",
+    "pytest>=7.0.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [project.scripts]
-kwqode = "kaiwu.cli.main:app"
+kwcode = "kaiwu.cli.main:app"
 
 [tool.setuptools.packages.find]
 where = ["."]

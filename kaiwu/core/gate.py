@@ -1,7 +1,7 @@
 """
 Gate: single LLM call, structured JSON output, routes to expert pipeline.
 RED-1: Must output structured JSON, no string parsing.
-v0.4: Expert registry integration — keyword match first, LLM fallback.
+v0.4.3: LLM通用分类为主，专家知识叠加（不替代）。
 """
 
 import json
@@ -9,6 +9,7 @@ import logging
 from typing import Optional, TYPE_CHECKING
 
 from kaiwu.llm.llama_backend import LLMBackend
+from kaiwu.core.orchestrator import EXPERT_SEQUENCES
 
 if TYPE_CHECKING:
     from kaiwu.registry.expert_registry import ExpertRegistry
@@ -20,33 +21,52 @@ GATE_SYSTEM = "你是任务分类器。只返回JSON，不要有其他内容。"
 GATE_PROMPT = """分析用户输入，返回分类JSON。
 
 expert_type选项：
-- locator_repair：修复bug、修改已有代码、在已有文件中添加/删除函数
-- codegen：从零创建全新文件或全新项目
-- refactor：重构、优化、整理已有代码结构
-- doc：写注释、文档、README
-- office：生成Excel/Word/PPT等办公文档
+- locator_repair：修复bug、修改已有代码（用户明确提到已有文件路径如src/xxx.py）
+- codegen：从零创建全新文件或全新项目（"写一个"、"生成"、"创建"开头的代码任务）
+- refactor：重构、优化、整理已有代码结构（用户明确提到已有文件+重构/拆分/提取）
+- doc：写注释、文档、README（仅限代码相关文档，用户明确提到已有文件+docstring/注释）
+- office：仅限生成Excel(.xlsx)/Word(.docx)/PPT(.pptx)办公文档，不包括代码文件
+- chat：问候、闲聊、非编码问题、询问天气、询问知识
 
 difficulty选项：easy | hard（hard = 跨多文件/逻辑复杂/描述模糊）
 
-注意：只要任务涉及已有文件，就选locator_repair或refactor，不要选codegen。
-codegen仅用于"从零创建"的场景。
+关键区分规则：
+- office仅用于Excel/Word/PPT，代码文件(.py/.js/.html/.css/.json/.go/.ts/.sh)一律不选office
+- "写一个xxx.py/html/js/css/json/go/ts/sh" → codegen（不是office！）
+- "修复src/xxx.py" → locator_repair
+- "重构src/xxx.py" → refactor
+- 不确定时优先选codegen或locator_repair，不要选office
+
+示例：
+- "你好" → {{"expert_type": "chat", "task_summary": "问候", "difficulty": "easy"}}
+- "今天南京天气" → {{"expert_type": "chat", "task_summary": "问天气", "difficulty": "easy"}}
+- "帮我修复登录bug" → {{"expert_type": "locator_repair", "task_summary": "修复登录", "difficulty": "easy"}}
+- "修复src/parser.py中的IndexError" → {{"expert_type": "locator_repair", "task_summary": "修复越界", "difficulty": "easy"}}
+- "重构src/reports.py提取公共函数" → {{"expert_type": "refactor", "task_summary": "提取函数", "difficulty": "easy"}}
+- "写个排序函数" → {{"expert_type": "codegen", "task_summary": "排序函数", "difficulty": "easy"}}
+- "写一个Flask API" → {{"expert_type": "codegen", "task_summary": "Flask API", "difficulty": "easy"}}
+- "写一个app.py" → {{"expert_type": "codegen", "task_summary": "生成app", "difficulty": "easy"}}
+- "生成一个config.json" → {{"expert_type": "codegen", "task_summary": "生成配置", "difficulty": "easy"}}
+- "给这个函数写注释" → {{"expert_type": "doc", "task_summary": "写注释", "difficulty": "easy"}}
+- "修复src/app.py的import错误" → {{"expert_type": "locator_repair", "task_summary": "修复import", "difficulty": "easy"}}
+- "生成一个Excel报表" → {{"expert_type": "office", "task_summary": "Excel报表", "difficulty": "easy"}}
 
 格式：{{"expert_type": "...", "task_summary": "10字内", "difficulty": "..."}}
 
 用户输入：{user_input}"""
 
-# JSON grammar constraint for llama.cpp (fallback if free-form JSON fails >5%)
+# JSON grammar constraint for llama.cpp
 GATE_GRAMMAR = r'''
 root   ::= "{" ws expert-type "," ws task-summary "," ws difficulty "}" ws
 expert-type ::= "\"expert_type\"" ws ":" ws "\"" expert-val "\""
-expert-val ::= "locator_repair" | "codegen" | "refactor" | "doc" | "office"
+expert-val ::= "locator_repair" | "codegen" | "refactor" | "doc" | "office" | "chat"
 task-summary ::= "\"task_summary\"" ws ":" ws string
 difficulty ::= "\"difficulty\"" ws ":" ws ("\"easy\"" | "\"hard\"")
 string ::= "\"" [^"]* "\""
 ws ::= [ \t\n]*
 '''
 
-VALID_EXPERT_TYPES = {"locator_repair", "codegen", "refactor", "doc", "office"}
+VALID_EXPERT_TYPES = {"locator_repair", "codegen", "refactor", "doc", "office", "chat"}
 VALID_DIFFICULTIES = {"easy", "hard"}
 
 
@@ -59,6 +79,8 @@ class Gate:
         ("generator", "verifier"): "codegen",
         ("locator", "generator"): "doc",
         ("generator",): "codegen",
+        ("office",): "office",
+        ("chat",): "chat",
     }
 
     def __init__(self, llm: LLMBackend, use_grammar: bool = False, registry: "ExpertRegistry | None" = None):
@@ -68,29 +90,11 @@ class Gate:
 
     def classify(self, user_input: str, memory_context: str = "") -> dict:
         """
-        Classify user input into expert_type + difficulty.
-        1. Try expert registry keyword match (no LLM call, millisecond-level)
-        2. Fall through to general LLM classification if no match
+        Classify user input: LLM通用分类为主，专家知识为辅（叠加模式）。
+        1. LLM通用分类 → expert_type (codegen/locator_repair/refactor/doc/chat)
+        2. 专家关键词匹配 → 叠加领域知识(system_prompt)，不替代通用分类
         """
-        # ── Expert registry fast path ──
-        if self.registry:
-            match = self.registry.match(user_input)
-            if match:
-                expert = match["expert"]
-                pipeline = tuple(expert["pipeline"])
-                expert_type = self._PIPELINE_TO_TYPE.get(pipeline, "locator_repair")
-                return {
-                    "expert_type": expert_type,
-                    "expert_name": match["name"],
-                    "task_summary": user_input[:10],
-                    "difficulty": "hard" if len(pipeline) >= 3 else "easy",
-                    "route_type": "expert_registry",
-                    "confidence": match["confidence"],
-                    "system_prompt": expert.get("system_prompt", ""),
-                    "pipeline": list(pipeline),
-                }
-
-        # ── General LLM classification fallback ──
+        # ── Step 1: LLM通用分类（始终执行，作为主分类结果）──
         prompt = GATE_PROMPT.format(user_input=user_input)
         if memory_context:
             prompt = f"项目记忆：\n{memory_context}\n\n{prompt}"
@@ -101,14 +105,57 @@ class Gate:
             prompt=prompt,
             system=GATE_SYSTEM,
             max_tokens=150,
-            temperature=0.0,
+            temperature=0.01,
             stop=["\n\n"],
             grammar_str=grammar,
         )
 
         result = self._parse(raw, user_input)
+        result = self._postprocess(result, user_input)
+
+        # ── Step 2: 专家关键词匹配（叠加模式，不替代通用分类）──
         result["expert_name"] = None
         result["route_type"] = "general"
+
+        if self.registry:
+            match = self.registry.match(user_input)
+            if match:
+                expert = match["expert"]
+                expert_pipeline = tuple(expert["pipeline"])
+                general_pipeline = tuple(
+                    EXPERT_SEQUENCES.get(result["expert_type"], ["generator", "verifier"])
+                )
+
+                # 专家pipeline和通用分类一致 → 用专家（加载system_prompt）
+                # 不一致 → 以通用分类为准，专家system_prompt作为附加知识注入
+                result["expert_name"] = match["name"]
+                result["confidence"] = match["confidence"]
+                result["system_prompt"] = expert.get("system_prompt", "")
+
+                if expert_pipeline == general_pipeline:
+                    # 完全一致：走专家路由
+                    result["route_type"] = "expert_registry"
+                    result["pipeline"] = list(expert_pipeline)
+                else:
+                    # 不一致：通用分类为主，专家知识为辅
+                    result["route_type"] = "general_with_expert"
+                    # 不覆盖pipeline，让orchestrator用通用的EXPERT_SEQUENCES
+
+        return result
+
+    @staticmethod
+    def _postprocess(result: dict, user_input: str) -> dict:
+        """最后一道防线：仅纠正office误分类。不替代模型分类能力。"""
+        et = result.get("expert_type", "chat")
+        lower = user_input.lower()
+
+        # office仅限Excel/Word/PPT办公文档，代码任务不应走office
+        if et == "office":
+            # 只有明确提到办公文档格式才保留office
+            _OFFICE_FORMATS = (".xlsx", ".docx", ".pptx", "excel", "word文档", "ppt模板", "幻灯片")
+            if not any(fmt in lower for fmt in _OFFICE_FORMATS):
+                result["expert_type"] = "chat"  # 降级到chat，让模型重新理解
+
         return result
 
     def _parse(self, raw: str, user_input: str) -> dict:
@@ -132,10 +179,10 @@ class Gate:
                 "task_summary": summary[:20] if summary else user_input[:10],
                 "difficulty": diff,
             }
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
+        except (json.JSONDecodeError, ValueError, KeyError, AttributeError, TypeError) as e:
             logger.warning("Gate parse failed (raw=%r): %s", raw[:200], e)
             return {
-                "expert_type": "locator_repair",
+                "expert_type": "chat",
                 "task_summary": user_input[:10],
                 "difficulty": "easy",
                 "_parse_error": str(e),

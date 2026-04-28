@@ -1,4 +1,4 @@
-# KwQode 安装程序 - Windows PowerShell
+# KwCode 安装程序 - Windows PowerShell
 # 用法: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Continue"
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Continue"
 # ── Banner ───────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║       KwQode 安装程序 v0.4            ║" -ForegroundColor Cyan
+Write-Host "  ║       KwCode 安装程序 v0.4            ║" -ForegroundColor Cyan
 Write-Host "  ║   本地模型 Coding Agent               ║" -ForegroundColor Cyan
 Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
@@ -64,7 +64,7 @@ try {
 }
 
 # ── Step 3: pip install kaiwu ────────────────────────────────
-Write-Step "安装 KwQode..."
+Write-Step "安装 KwCode..."
 
 $installed = $false
 
@@ -87,7 +87,7 @@ if (-not $installed) {
 }
 
 if (-not $installed) {
-    Write-Err "KwQode 安装失败"
+    Write-Err "KwCode 安装失败"
     Write-Info "请手动执行: $pythonCmd -m pip install kaiwu"
     Write-Info "如果网络慢，加上: -i https://pypi.tuna.tsinghua.edu.cn/simple"
     exit 1
@@ -155,26 +155,57 @@ if ($ollamaOk) {
     }
 }
 
-# ── Step 6: kwqode init ──────────────────────────────────────
-Write-Step "初始化 KwQode..."
+# ── Step 5.5: SearXNG 搜索服务 ──────────────────────────────
+Write-Step "启动搜索服务（SearXNG）..."
+
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    $running = docker ps --format '{{.Names}}' | Where-Object { $_ -eq "kwcode-searxng" }
+    if ($running) {
+        Write-Info "SearXNG 已在运行，跳过"
+    } else {
+        $exists = docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq "kwcode-searxng" }
+        if ($exists) {
+            docker start kwcode-searxng
+            Write-Info "SearXNG 已重新启动"
+        } else {
+            Write-Info "拉取 SearXNG 镜像（约150MB）..."
+            docker pull searxng/searxng
+            docker run -d --name kwcode-searxng --restart always -p 8080:8080 searxng/searxng
+            Write-Info "等待 SearXNG 启动..."
+            for ($i = 1; $i -le 15; $i++) {
+                try {
+                    $null = Invoke-WebRequest -Uri "http://localhost:8080" -TimeoutSec 2 -UseBasicParsing
+                    Write-Info "SearXNG 已就绪：http://localhost:8080"
+                    break
+                } catch { Start-Sleep -Seconds 1 }
+            }
+        }
+    }
+} else {
+    Write-Warn "未检测到 Docker，搜索增强将使用 DuckDuckGo 降级方案"
+    Write-Info "安装 Docker 可获得更好的搜索体验：https://docs.docker.com/get-docker/"
+}
+
+# ── Step 6: kwcode init ──────────────────────────────────────
+Write-Step "初始化 KwCode..."
 
 try {
-    & kwqode init 2>&1 | Out-Null
+    & kwcode init 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Info "KAIWU.md 已初始化"
     }
 } catch {
-    Write-Info "跳过初始化（可稍后在项目目录执行 kwqode init）"
+    Write-Info "跳过初始化（可稍后在项目目录执行 kwcode init）"
 }
 
-# ── Step 7: kwqode status ────────────────────────────────────
+# ── Step 7: kwcode status ────────────────────────────────────
 Write-Step "验证安装..."
 
 try {
-    & kwqode status
+    & kwcode status
 } catch {
     Write-Warn "状态检查失败，但安装可能已成功"
-    Write-Info "请手动执行: kwqode status"
+    Write-Info "请手动执行: kwcode status"
 }
 
 # ── 完成 ─────────────────────────────────────────────────────
@@ -185,9 +216,9 @@ Write-Host "  ╚═════════════════════
 Write-Host ""
 Write-Host "  下一步:" -ForegroundColor Cyan
 Write-Host "    1. cd 到你的项目目录" -ForegroundColor White
-Write-Host "    2. kwqode init          # 初始化项目记忆" -ForegroundColor White
-Write-Host "    3. kwqode               # 进入交互模式" -ForegroundColor White
-Write-Host '    4. kwqode "修复登录bug"  # 直接执行任务' -ForegroundColor White
+Write-Host "    2. kwcode init          # 初始化项目记忆" -ForegroundColor White
+Write-Host "    3. kwcode               # 进入交互模式" -ForegroundColor White
+Write-Host '    4. kwcode "修复登录bug"  # 直接执行任务' -ForegroundColor White
 Write-Host ""
 Write-Host "  文档: https://github.com/kaiwu-agent/kaiwu" -ForegroundColor Gray
 Write-Host ""

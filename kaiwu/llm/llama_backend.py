@@ -29,7 +29,7 @@ class LLMBackend:
     """Unified LLM interface supporting llama.cpp native and Ollama HTTP."""
 
     # Models known to use thinking/reasoning tokens that consume num_predict budget
-    REASONING_MODELS = {"deepseek-r1", "qwq", "qwen3", "gemma4"}  # thinking/reasoning models
+    REASONING_PREFIXES = ("deepseek-r1", "qwq", "qwen3", "gemma4")
     # Multiplier for num_predict when using reasoning models
     REASONING_TOKEN_MULTIPLIER = 8
 
@@ -56,6 +56,8 @@ class LLMBackend:
         self._llm: Optional[object] = None
         self._mode = "none"
         self._is_reasoning = self._detect_reasoning_model(ollama_model)
+        self._tps_estimator = None  # set externally by CLI for tok/s tracking
+        self._last_elapsed: float = 0.0  # last generate elapsed seconds
 
         # Prefer native llama.cpp if model_path provided and library available
         if model_path and HAS_LLAMA_CPP:
@@ -126,9 +128,16 @@ class LLMBackend:
         grammar_str: Optional[str] = None,
     ) -> str:
         """Generate text completion. Returns raw string output."""
+        import time as _time
+        t0 = _time.perf_counter()
         if self._mode == "llama_cpp":
-            return self._generate_native(prompt, system, max_tokens, temperature, stop, grammar_str)
-        return self._generate_ollama(prompt, system, max_tokens, temperature, stop)
+            result = self._generate_native(prompt, system, max_tokens, temperature, stop, grammar_str)
+        else:
+            result = self._generate_ollama(prompt, system, max_tokens, temperature, stop)
+        self._last_elapsed = _time.perf_counter() - t0
+        if self._tps_estimator:
+            self._tps_estimator.record(result, self._last_elapsed)
+        return result
 
     def _generate_native(
         self, prompt: str, system: str, max_tokens: int,
@@ -175,24 +184,30 @@ class LLMBackend:
         grammar_str: Optional[str] = None,
     ) -> str:
         """Chat-style completion (for Ollama /api/chat or converted to prompt for llama.cpp)."""
+        import time as _time
+        t0 = _time.perf_counter()
         if self._mode == "ollama":
-            return self._chat_ollama(messages, max_tokens, temperature, stop)
-
-        # Convert messages to single prompt for llama.cpp
-        system = ""
-        prompt_parts = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                system = content
-            elif role == "user":
-                prompt_parts.append(f"User: {content}")
-            elif role == "assistant":
-                prompt_parts.append(f"Assistant: {content}")
-        prompt_parts.append("Assistant:")
-        prompt = "\n".join(prompt_parts)
-        return self._generate_native(prompt, system, max_tokens, temperature, stop, grammar_str)
+            result = self._chat_ollama(messages, max_tokens, temperature, stop)
+        else:
+            # Convert messages to single prompt for llama.cpp
+            system = ""
+            prompt_parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    system = content
+                elif role == "user":
+                    prompt_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    prompt_parts.append(f"Assistant: {content}")
+            prompt_parts.append("Assistant:")
+            prompt = "\n".join(prompt_parts)
+            result = self._generate_native(prompt, system, max_tokens, temperature, stop, grammar_str)
+        self._last_elapsed = _time.perf_counter() - t0
+        if self._tps_estimator:
+            self._tps_estimator.record(result, self._last_elapsed)
+        return result
 
     def _chat_ollama(
         self, messages: list[dict], max_tokens: int,
@@ -200,16 +215,13 @@ class LLMBackend:
     ) -> str:
         effective_tokens = max_tokens
         effective_temp = temperature
-        think_enabled = True  # Default: let model think
 
         if self._is_reasoning:
-            # Short-output tasks (Gate, Locator selection) don't need deep reasoning.
-            # Disable thinking to save 50-80% latency on classification tasks.
-            if max_tokens <= 500:
-                think_enabled = False
-                # No multiplier needed when thinking is off
-            else:
-                effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
+            # Reasoning models always need the multiplier — thinking tokens
+            # consume num_predict budget even for short-output tasks like Gate.
+            # Disabling thinking (think=False) causes some models (qwen3-vl)
+            # to produce empty output on structured tasks.
+            effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
 
             if temperature == 0.0:
                 effective_temp = 0.01
@@ -224,22 +236,32 @@ class LLMBackend:
             },
         }
 
-        # Disable thinking for short classification tasks on reasoning models
-        if self._is_reasoning and not think_enabled:
-            payload["think"] = False
-
-        # Don't pass stop sequences to reasoning models with thinking enabled
-        if stop and (not self._is_reasoning or not think_enabled):
+        # Don't pass stop sequences to reasoning models (thinking tokens contain newlines)
+        if stop and not self._is_reasoning:
             payload["options"]["stop"] = stop
 
         try:
             resp = httpx.post(
                 f"{self.ollama_url}/api/chat",
                 json=payload,
-                timeout=180.0,
+                timeout=360.0,
             )
             resp.raise_for_status()
-            raw = resp.json()["message"]["content"].strip()
+            data = resp.json()
+            msg = data.get("message", {})
+            if not msg:
+                logger.error("Ollama response missing 'message' key: %s", str(data)[:200])
+                return ""
+            raw = msg.get("content", "").strip()
+
+            # qwen3-vl等模型把所有输出放在thinking字段，content为空
+            # 如果content为空但thinking有内容，从thinking提取
+            if not raw and self._is_reasoning:
+                thinking = msg.get("thinking", "")
+                if thinking:
+                    logger.info("content为空，从thinking字段提取（%d chars）", len(thinking))
+                    raw = thinking.strip()
+
             return self._strip_thinking(raw)
         except Exception as e:
             logger.error("Ollama chat failed: %s", e)
@@ -247,6 +269,17 @@ class LLMBackend:
 
     @classmethod
     def _detect_reasoning_model(cls, model_name: str) -> bool:
-        """Detect if model uses thinking/reasoning tokens."""
+        """Detect if model uses thinking/reasoning tokens. Uses prefix matching."""
         name_lower = model_name.lower().split(":")[0]  # strip tag like :8b
-        return any(r in name_lower for r in cls.REASONING_MODELS)
+        return any(name_lower.startswith(p) for p in cls.REASONING_PREFIXES)
+
+    def set_endpoint(self, base_url: str, api_key: str = "", model: str = None):
+        """动态切换API endpoint和模型，支持/api temp和/model命令。"""
+        self.ollama_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self._mode = "ollama"
+        if model:
+            self.ollama_model = model
+            self._is_reasoning = self._detect_reasoning_model(model)
+        logger.info("[llm] endpoint切换到 %s model=%s reasoning=%s",
+                    base_url, self.ollama_model, self._is_reasoning)

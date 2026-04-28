@@ -30,11 +30,16 @@ Verifier feedback: {feedback}
 
 # 意图 → query 方向提示
 _DIRECTION_MAP = {
+    "code_search": "Generate queries that will find code implementations, GitHub repos, or technical solutions. Include terms like 'implementation', 'source code', 'library', or 'github' in queries",
+    "academic": "Generate queries that will find research papers, algorithms, or theoretical foundations. Include terms like 'paper', 'algorithm', 'arxiv', or 'survey' in queries",
+    "package": "Generate queries to find specific packages/libraries. Include the package manager name (pip/npm/cargo) and 'install' or 'documentation' in queries",
+    "debug": "Generate queries focused on error messages and fixes. Include the exact error text and 'fix' or 'solution' in queries",
+    "general": "Focus on practical coding solutions",
+    # Legacy mappings (backward compat)
     "github": "Include 'github' or 'repository' in at least one query",
     "arxiv": "Include 'arxiv' or 'paper' in at least one query",
     "pypi": "Include 'python package' or 'pip install' in at least one query",
     "bug": "Include 'fix' or 'solution' in at least one query",
-    "general": "Focus on practical coding solutions",
 }
 
 

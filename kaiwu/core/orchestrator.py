@@ -14,11 +14,17 @@ from kaiwu.experts.generator import GeneratorExpert
 from kaiwu.experts.verifier import VerifierExpert
 from kaiwu.experts.search_augmentor import SearchAugmentorExpert
 from kaiwu.experts.office_handler import OfficeHandlerExpert
+from kaiwu.experts.chat_expert import ChatExpert
 from kaiwu.memory.kaiwu_md import KaiwuMemory
 from kaiwu.registry.expert_registry import ExpertRegistry
 from kaiwu.tools.executor import ToolExecutor
 from kaiwu.flywheel.trajectory_collector import TrajectoryCollector
 from kaiwu.flywheel.pattern_detector import PatternDetector
+from kaiwu.flywheel.ab_tester import ABTester
+from kaiwu.core.checkpoint import Checkpoint
+from kaiwu.core.kwcode_md import load_kwcode_md, build_kwcode_system
+from kaiwu.stats.value_tracker import ValueTracker
+from kaiwu.notification.flywheel_notifier import FlywheelNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +33,9 @@ EXPERT_SEQUENCES = {
     "locator_repair": ["locator", "generator", "verifier"],
     "codegen":        ["generator", "verifier"],
     "refactor":       ["locator", "generator", "verifier"],
-    "doc":            ["generator"],
+    "doc":            ["locator", "generator"],
     "office":         ["office"],
+    "chat":           ["chat"],
 }
 
 
@@ -48,17 +55,23 @@ class PipelineOrchestrator:
         memory: KaiwuMemory,
         registry: ExpertRegistry | None = None,
         trajectory_collector: TrajectoryCollector | None = None,
+        ab_tester: ABTester | None = None,
+        chat_expert: ChatExpert | None = None,
     ):
         self.locator = locator
         self.generator = generator
         self.verifier = verifier
         self.search_augmentor = search_augmentor
         self.office_handler = office_handler
+        self.chat_expert = chat_expert
         self.tools = tool_executor
         self.memory = memory
         self.registry = registry
         self.trajectory_collector = trajectory_collector
         self._pattern_detector = PatternDetector(trajectory_collector) if trajectory_collector else None
+        self.ab_tester = ab_tester
+        self._value_tracker = ValueTracker()
+        self._notifier = FlywheelNotifier()
 
     def run(
         self,
@@ -75,6 +88,9 @@ class PipelineOrchestrator:
         """
         start_time = time.time()
 
+        # Store project_root for Gate 2 backtest use
+        self._backtest_project_root = project_root
+
         ctx = TaskContext(
             user_input=user_input,
             project_root=project_root,
@@ -84,6 +100,63 @@ class PipelineOrchestrator:
         )
 
         expert_type = gate_result.get("expert_type", "locator_repair")
+
+        # ── KWCODE.md rules injection ──
+        kwcode_sections = load_kwcode_md(project_root)
+        if kwcode_sections:
+            kwcode_rules = build_kwcode_system(expert_type, kwcode_sections)
+            if kwcode_rules:
+                ctx.kwcode_rules = kwcode_rules
+                # Prepend to expert_system_prompt so it flows to all experts
+                if ctx.expert_system_prompt:
+                    ctx.expert_system_prompt = f"{kwcode_rules}\n\n{ctx.expert_system_prompt}"
+                else:
+                    ctx.expert_system_prompt = kwcode_rules
+
+        # chat类型：直接回复，不走AB测试/搜索/重试
+        if expert_type == "chat":
+            self._emit(on_status, "chat", "聊天模式")
+            if self.chat_expert:
+                result = self.chat_expert.run(ctx)
+            else:
+                ctx.generator_output = {"explanation": "我是KWCode，专注于代码任务。", "patches": []}
+                result = {"passed": True}
+            elapsed = time.time() - start_time
+            return {
+                "success": True,
+                "context": ctx,
+                "error": None,
+                "elapsed": elapsed,
+            }
+
+        # Gate 3: AB test — check if a candidate expert should be used for this task
+        ab_candidate_name = None
+        ab_used_new = False
+        if self.ab_tester and expert_type != "chat":
+            candidate_def = self.ab_tester.should_use_candidate(expert_type)
+            if candidate_def:
+                ab_candidate_name = candidate_def["name"]
+                ab_used_new = True
+                # Override gate_result to use the candidate expert's pipeline
+                gate_result = {
+                    **gate_result,
+                    "expert_name": ab_candidate_name,
+                    "route_type": "expert_registry",
+                    "pipeline": candidate_def.get("pipeline", []),
+                    "system_prompt": candidate_def.get("system_prompt", ""),
+                }
+                self._emit(on_status, "ab_test", f"AB测试：使用候选专家 {ab_candidate_name}")
+            else:
+                # Check if any candidate is in AB testing for this type (baseline run)
+                for name, info in self.ab_tester._candidates.items():
+                    if (info["status"] == "ab_testing"
+                            and info["expert_def"].get("type") == expert_type
+                            and len(info["ab_results"]) < 10):
+                        ab_candidate_name = name
+                        ab_used_new = False
+                        self._emit(on_status, "ab_test", f"AB测试：基线对照（候选 {name}）")
+                        break
+
         # Use custom pipeline from expert registry if available, else default
         if gate_result.get("route_type") == "expert_registry" and "pipeline" in gate_result:
             sequence = gate_result["pipeline"]
@@ -92,11 +165,30 @@ class PipelineOrchestrator:
 
         self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')}")
 
+        # codegen任务如果涉及实时数据，首次就触发搜索（不等失败重试）
+        if expert_type == "codegen" and not no_search and self._needs_realtime_data(user_input):
+            self._emit(on_status, "search", "检测到实时数据需求，预搜索...")
+            ctx.search_results = self.search_augmentor.search(ctx)
+            ctx.search_triggered = True
+            if ctx.search_results:
+                self._emit(on_status, "search_done", f"搜索完成，注入{len(ctx.search_results)}字参考信息")
+
+        # ── Checkpoint: snapshot before execution ──
+        checkpoint = Checkpoint(project_root)
+        checkpoint_saved = checkpoint.save()
+        if not checkpoint_saved:
+            # P1-RED-3: must notify user on failure
+            self._emit(on_status, "warning", "无法创建文件快照，任务失败时需手动还原")
+
         while ctx.retry_count < self.MAX_RETRIES:
             success = self._run_sequence(sequence, ctx, on_status)
 
+            # Notify locator of task result (graph stats + incremental update)
+            self._notify_locator(ctx, success)
+
             if success:
                 elapsed = time.time() - start_time
+                checkpoint.discard()  # Clean up snapshot on success
                 # Save to memory on success (with elapsed for expert/pattern tracking)
                 self.memory.save(project_root, ctx, elapsed=elapsed)
                 # Update expert registry stats
@@ -105,6 +197,12 @@ class PipelineOrchestrator:
                     self.registry.update_stats(expert_name, success=True, latency=elapsed)
                 # Flywheel: record trajectory and detect patterns (non-blocking)
                 self._record_trajectory(ctx, True, elapsed, on_status)
+                # Gate 3: record AB test result if this task is part of an AB test
+                self._record_ab_result(ab_candidate_name, ab_used_new, True, elapsed, on_status)
+                # P2: Value tracking (local SQLite)
+                self._record_value(project_root, gate_result, True, elapsed, ctx)
+                # P2: Milestone check
+                self._check_milestone(on_status)
                 return {
                     "success": True,
                     "context": ctx,
@@ -117,7 +215,17 @@ class PipelineOrchestrator:
             if ctx.verifier_output:
                 error_detail = ctx.verifier_output.get("error_detail", "")
 
+            # Save failure info for retry strategy
+            ctx.previous_failure = error_detail
+
             self._emit(on_status, "retry", f"第{ctx.retry_count}次尝试失败：{error_detail[:100]}")
+
+            # Reflection before 2nd retry: ask LLM why the patch failed
+            if ctx.retry_count == 1 and ctx.verifier_output and ctx.generator_output:
+                self._do_reflection(ctx, on_status)
+
+            # Set retry strategy: each retry uses a different approach
+            ctx.retry_strategy = ctx.retry_count  # 0→1→2
 
             # Trigger SearchAugmentor: failed 2x OR hard task failed 1x
             should_search = (
@@ -137,6 +245,17 @@ class PipelineOrchestrator:
             ctx.relevant_code_snippets = {}
 
         elapsed = time.time() - start_time
+
+        # ── Checkpoint: restore on failure ──
+        if checkpoint_saved:
+            restored = checkpoint.restore()
+            if restored:
+                self._emit(on_status, "checkpoint", "已还原到任务执行前的状态")
+            else:
+                self._emit(on_status, "warning", "还原失败，请手动检查文件")
+        # Downgrade suggestion
+        self._suggest_downgrade(ctx, on_status)
+
         # Record failure in pattern memory
         self.memory.save_failure(project_root, ctx, elapsed=elapsed)
         # Update expert registry stats on failure
@@ -145,6 +264,10 @@ class PipelineOrchestrator:
             self.registry.update_stats(expert_name, success=False, latency=elapsed)
         # Flywheel: record failure trajectory
         self._record_trajectory(ctx, False, elapsed, on_status)
+        # Gate 3: record AB test failure if this task is part of an AB test
+        self._record_ab_result(ab_candidate_name, ab_used_new, False, elapsed, on_status)
+        # P2: Value tracking (local SQLite)
+        self._record_value(project_root, gate_result, False, elapsed, ctx)
         return {
             "success": False,
             "context": ctx,
@@ -186,10 +309,12 @@ class PipelineOrchestrator:
                 self._emit(on_status, "verifier_done", f"语法OK | 测试：{tp}/{tt}")
 
             elif step == "office":
+                self._emit(on_status, "office", "生成Office文档...")
                 result = self.office_handler.run(ctx)
                 if not result.get("passed", False):
-                    self._emit(on_status, "office_fail", result.get("error", ""))
+                    self._emit(on_status, "office_fail", result.get("error", "生成失败"))
                     return False
+                self._emit(on_status, "office_done", result.get("output", "完成"))
 
         return True
 
@@ -209,9 +334,114 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.debug("Flywheel recording failed (non-blocking): %s", e)
 
+    def _record_ab_result(self, candidate_name, used_new, success, elapsed, on_status):
+        """Record AB test result for gate 3 (non-blocking, never raises)."""
+        if not self.ab_tester or not candidate_name:
+            return
+        try:
+            self.ab_tester.record_ab_result(candidate_name, used_new, success, elapsed)
+            total = len(self.ab_tester._candidates.get(candidate_name, {}).get("ab_results", []))
+            self._emit(on_status, "ab_test_record",
+                       f"AB结果已记录：{'候选' if used_new else '基线'} "
+                       f"{'成功' if success else '失败'} ({total}/10)")
+            # Auto-graduation is handled inside record_ab_result when total >= 10
+            status = self.ab_tester._candidates.get(candidate_name, {}).get("status", "")
+            if status == "graduated":
+                self._emit(on_status, "ab_graduated",
+                           f"专家 {candidate_name} 通过Gate 3，已注册投产！")
+            elif status == "archived":
+                self._emit(on_status, "ab_archived",
+                           f"专家 {candidate_name} 未通过Gate 3，已归档")
+        except Exception as e:
+            logger.debug("AB result recording failed (non-blocking): %s", e)
+
+    def _notify_locator(self, ctx: TaskContext, success: bool):
+        """Notify locator of task result for graph stats + incremental update (non-blocking)."""
+        try:
+            if hasattr(self.locator, 'notify_task_result'):
+                self.locator.notify_task_result(ctx, success)
+        except Exception as e:
+            logger.debug("Locator notify failed (non-blocking): %s", e)
+
+    def _suggest_downgrade(self, ctx: TaskContext, on_status):
+        """Post-failure: suggest narrowing scope (small model enhancement)."""
+        files = ctx.locator_output.get("relevant_files", []) if ctx.locator_output else []
+        functions = ctx.locator_output.get("relevant_functions", []) if ctx.locator_output else []
+
+        if len(files) > 1 and functions:
+            first_func = functions[0]
+            self._emit(on_status, "suggest",
+                       f"建议缩小范围重试：只修复 {first_func}() 函数")
+        elif len(files) == 1 and ctx.gate_result.get("difficulty") == "hard":
+            self._emit(on_status, "suggest", "任务较复杂，建议拆分后分步执行")
+
+    def _do_reflection(self, ctx: TaskContext, on_status):
+        """Ask LLM to analyze why the previous patch failed. One sentence, ≤50字."""
+        try:
+            error = ctx.verifier_output.get("error_detail", "") if ctx.verifier_output else ""
+            patches = ctx.generator_output.get("patches", []) if ctx.generator_output else []
+            modified_snippet = patches[0].get("modified", "")[:500] if patches else ""
+
+            reflection_prompt = (
+                f"你刚才生成的patch失败了。\n"
+                f"失败原因：{error[:300]}\n"
+                f"你修改的代码片段：\n{modified_snippet}\n\n"
+                f"分析：这个patch为什么会失败？根本原因是什么？\n"
+                f"用一句话回答，不超过50字。"
+            )
+            reflection = self.generator.llm.generate(
+                prompt=reflection_prompt,
+                system="你是代码审查专家，只做错误分析，不生成代码。",
+                max_tokens=100,
+                temperature=0.0,
+            )
+            ctx.reflection = reflection.strip()
+            logger.info("[orchestrator] reflection: %s", ctx.reflection)
+            self._emit(on_status, "reflection", f"反思：{ctx.reflection[:80]}")
+        except Exception as e:
+            logger.debug("Reflection failed (non-blocking): %s", e)
+
     @staticmethod
     def _emit(callback, stage: str, detail: str):
         """Emit status update if callback provided."""
         if callback:
             callback(stage, detail)
         logger.info("[%s] %s", stage, detail)
+
+    @staticmethod
+    def _needs_realtime_data(user_input: str) -> bool:
+        """检测用户输入是否需要实时数据（天气、股价、新闻等）。"""
+        keywords = [
+            "天气", "气温", "温度", "weather", "forecast",
+            "股价", "股票", "汇率", "价格", "price",
+            "新闻", "最新", "最近", "今天", "今日", "本周", "这周", "一周",
+            "news", "latest", "today", "recent",
+        ]
+        lower = user_input.lower()
+        return any(kw in lower for kw in keywords)
+
+    def _record_value(self, project_root, gate_result, success, elapsed, ctx):
+        """P2: Record task to local SQLite for value dashboard (non-blocking)."""
+        try:
+            self._value_tracker.record(
+                project_root=project_root,
+                expert_type=gate_result.get("expert_type", ""),
+                expert_name=gate_result.get("expert_name", "") or "",
+                success=success,
+                elapsed_s=elapsed,
+                retry_count=ctx.retry_count,
+                model=getattr(self, '_model_name', 'unknown'),
+            )
+        except Exception as e:
+            logger.debug("Value tracking failed (non-blocking): %s", e)
+
+    def _check_milestone(self, on_status):
+        """P2: Check if total task count hits a milestone (50/100/200/500)."""
+        MILESTONES = {50, 100, 200, 500}
+        try:
+            total = self._value_tracker.get_total_task_count()
+            if total in MILESTONES:
+                expert_count = len(self.registry.list_experts(expert_type="generated")) if self.registry else 0
+                self._notifier.queue_milestone(total, expert_count, 0.0)
+        except Exception as e:
+            logger.debug("Milestone check failed (non-blocking): %s", e)

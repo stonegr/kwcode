@@ -34,9 +34,18 @@ class TaskContext:
 
     # Retry / search state
     retry_count: int = 0
+    retry_strategy: int = 0       # 0=正常/1=从错误出发/2=最小化修改
+    previous_failure: str = ""    # 上次失败的error_detail
+    reflection: str = ""          # LLM对失败原因的一句话分析
     search_triggered: bool = False
     search_results: str = ""
 
     # Collected file contents (populated by Locator for Generator use)
     relevant_code_snippets: dict = field(default_factory=dict)
     # shape: {"path/to/file.py": "code content around target function"}
+
+    # Document context (populated by DocReader via Locator)
+    doc_context: str = ""
+
+    # KWCODE.md injected rules (populated by orchestrator)
+    kwcode_rules: str = ""

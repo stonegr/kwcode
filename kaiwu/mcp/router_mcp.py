@@ -1,7 +1,7 @@
 """
 KaiwuMCP: Router MCP server.
 CORE-7: This is the ONLY external entry point. LLM does not directly see experts.
-Single tool: kwqode_execute(task_description: str) -> str
+Single tool: kwcode_execute(task_description: str) -> str
 
 The `mcp` package is optional. This module is always importable, but
 starting the server requires `pip install mcp`.
@@ -30,7 +30,7 @@ def _require_mcp():
 
 
 class KaiwuMCP:
-    """MCP server that wraps the entire KwQode pipeline as a single tool."""
+    """MCP server that wraps the entire KwCode pipeline as a single tool."""
 
     def __init__(self, gate, orchestrator, memory, project_root: str):
         _require_mcp()
@@ -38,20 +38,20 @@ class KaiwuMCP:
         self.orchestrator = orchestrator
         self.memory = memory
         self.project_root = project_root
-        self.server = Server("kwqode")
+        self.server = Server("kwcode")
         self._setup_tools()
 
     def _setup_tools(self):
-        """Register the single kwqode_execute tool."""
+        """Register the single kwcode_execute tool."""
 
         @self.server.list_tools()
         async def list_tools():
             return [
                 Tool(
-                    name="kwqode_execute",
+                    name="kwcode_execute",
                     description=(
-                        "Execute a coding task through KwQode's local-model expert pipeline. "
-                        "KwQode automatically selects the right expert, locates relevant files, "
+                        "Execute a coding task through KwCode's local-model expert pipeline. "
+                        "KwCode automatically selects the right expert, locates relevant files, "
                         "generates patches, and verifies the result."
                     ),
                     inputSchema={
@@ -69,10 +69,14 @@ class KaiwuMCP:
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict):
-            if name != "kwqode_execute":
+            if name != "kwcode_execute":
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
-            task = arguments.get("task_description", "").strip()
+            if not isinstance(arguments, dict):
+                return [TextContent(type="text", text="Error: arguments must be a JSON object.")]
+
+            task_raw = arguments.get("task_description", "")
+            task = str(task_raw).strip() if task_raw else ""
             if not task:
                 return [TextContent(type="text", text="Error: task_description is required.")]
 
@@ -80,7 +84,7 @@ class KaiwuMCP:
                 result_text = await self._execute(task)
                 return [TextContent(type="text", text=result_text)]
             except Exception as e:
-                logger.exception("kwqode_execute failed")
+                logger.exception("kwcode_execute failed")
                 return [TextContent(type="text", text=f"Error: {e}")]
 
     async def _execute(self, task: str) -> str:

@@ -1,0 +1,310 @@
+{
+  "version": "1.0",
+  "total": 24,
+  "tasks": [
+    {
+      "task_id": "t01",
+      "dir_name": "t01_pipeline",
+      "description": "实现数据处理pipeline：DataLoader(CSV解析)、DataTransformer(类型转换/过滤/聚合)、PipelineValidator(校验规则)",
+      "files": [
+        "pipeline.py",
+        "pipeline_test.py"
+      ],
+      "test_file": "pipeline_test.py",
+      "test_cmd": "pytest pipeline_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t02",
+      "dir_name": "t02_config_chain",
+      "description": "实现配置链：支持多层配置合并、环境变量覆盖、类型校验",
+      "files": [
+        "config_chain.py",
+        "config_chain_test.py"
+      ],
+      "test_file": "config_chain_test.py",
+      "test_cmd": "pytest config_chain_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t03",
+      "dir_name": "t03_state_machine",
+      "description": "实现有限状态机：状态定义、转换规则、事件触发、守卫条件",
+      "files": [
+        "state_machine.py",
+        "state_machine_test.py"
+      ],
+      "test_file": "state_machine_test.py",
+      "test_cmd": "pytest state_machine_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t04",
+      "dir_name": "t04_hidden_bug_calc",
+      "description": "修复计算器bug：支持四则运算、运算符优先级、括号、负数、错误处理",
+      "files": [
+        "calculator.py",
+        "calculator_test.py"
+      ],
+      "test_file": "calculator_test.py",
+      "test_cmd": "pytest calculator_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t05",
+      "dir_name": "t05_hidden_bug_parser",
+      "description": "修复Markdown解析器bug：标题、粗体、斜体、链接、代码块解析",
+      "files": [
+        "markdown_parser.py",
+        "markdown_parser_test.py"
+      ],
+      "test_file": "markdown_parser_test.py",
+      "test_cmd": "pytest markdown_parser_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t06",
+      "dir_name": "t06_hidden_bug_cache",
+      "description": "修复LRU缓存bug：get/put操作、容量限制、过期策略",
+      "files": [
+        "lru_cache.py",
+        "lru_cache_test.py"
+      ],
+      "test_file": "lru_cache_test.py",
+      "test_cmd": "pytest lru_cache_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t07",
+      "dir_name": "t07_refactor_extract",
+      "description": "重构订单处理器：提取子函数（小计、税费、折扣、运费计算）",
+      "files": [
+        "order_processor.py",
+        "order_processor_test.py"
+      ],
+      "test_file": "order_processor_test.py",
+      "test_cmd": "pytest order_processor_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t08",
+      "dir_name": "t08_refactor_rename",
+      "description": "重构用户管理器：重命名函数和变量为更清晰的命名",
+      "files": [
+        "user_manager.py",
+        "user_manager_test.py"
+      ],
+      "test_file": "user_manager_test.py",
+      "test_cmd": "pytest user_manager_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t09",
+      "dir_name": "t09_refactor_split",
+      "description": "重构任务管理器：拆分大函数为多个职责单一的小函数",
+      "files": [
+        "task_manager.py",
+        "task_manager_test.py"
+      ],
+      "test_file": "task_manager_test.py",
+      "test_cmd": "pytest task_manager_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t10",
+      "dir_name": "t10_comprehensive",
+      "description": "实现事件总线：订阅/发布、通配符匹配、优先级、一次性监听",
+      "files": [
+        "event_bus.py",
+        "event_bus_test.py"
+      ],
+      "test_file": "event_bus_test.py",
+      "test_cmd": "pytest event_bus_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t11",
+      "dir_name": "t11_log_aggregator",
+      "description": "实现日志聚合器：多源日志收集、过滤、格式化、统计",
+      "files": [
+        "log_aggregator.py",
+        "log_aggregator_test.py"
+      ],
+      "test_file": "log_aggregator_test.py",
+      "test_cmd": "pytest log_aggregator_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t13",
+      "dir_name": "t13_stack_calc",
+      "description": "实现栈计算器：词法分析、中缀转后缀、后缀求值、完整calculate函数",
+      "files": [
+        "stack_calc.py",
+        "stack_calc_test.py"
+      ],
+      "test_file": "stack_calc_test.py",
+      "test_cmd": "pytest stack_calc_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t14",
+      "dir_name": "t14_http_router",
+      "description": "实现HTTP路由器：路径匹配、参数提取、中间件链、请求处理",
+      "files": [
+        "handler.py",
+        "http_router_test.py",
+        "middleware.py",
+        "router.py"
+      ],
+      "test_file": "http_router_test.py",
+      "test_cmd": "pytest http_router_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t15",
+      "dir_name": "t15_json_schema_validator",
+      "description": "实现JSON Schema验证器：类型检查、必填字段、嵌套对象、数组校验",
+      "files": [
+        "schema_validator.py",
+        "schema_validator_test.py"
+      ],
+      "test_file": "schema_validator_test.py",
+      "test_cmd": "pytest schema_validator_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t16",
+      "dir_name": "t16_rbac_system",
+      "description": "实现RBAC权限系统：角色定义、权限分配、继承、访问控制检查",
+      "files": [
+        "rbac_system.py",
+        "rbac_system_test.py"
+      ],
+      "test_file": "rbac_system_test.py",
+      "test_cmd": "pytest rbac_system_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t19",
+      "dir_name": "t19_db_migration",
+      "description": "实现数据库迁移工具：schema定义、迁移生成、正向/回滚执行",
+      "files": [
+        "migration.py",
+        "migration_test.py",
+        "schema.py"
+      ],
+      "test_file": "migration_test.py",
+      "test_cmd": "pytest migration_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t20",
+      "dir_name": "t20_doc_generator",
+      "description": "实现文档生成器：从代码提取docstring、生成Markdown文档",
+      "files": [
+        "doc_generator.py",
+        "doc_generator_test.py"
+      ],
+      "test_file": "doc_generator_test.py",
+      "test_cmd": "pytest doc_generator_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t21",
+      "dir_name": "t21_expr_engine",
+      "description": "实现表达式引擎：变量绑定、函数调用、条件表达式、类型推断",
+      "files": [
+        "expr_engine.py",
+        "expr_engine_test.py"
+      ],
+      "test_file": "expr_engine_test.py",
+      "test_cmd": "pytest expr_engine_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t23",
+      "dir_name": "t23_micro_orm",
+      "description": "实现微型ORM：模型定义、查询构建、连接管理、CRUD操作",
+      "files": [
+        "connection.py",
+        "micro_orm_test.py",
+        "model.py",
+        "query.py"
+      ],
+      "test_file": "micro_orm_test.py",
+      "test_cmd": "pytest micro_orm_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t24",
+      "dir_name": "t24_compiler_frontend",
+      "description": "实现编译器前端：词法分析器、语法解析器、求值器",
+      "files": [
+        "evaluator.py",
+        "lexer.py",
+        "parser.py",
+        "test_compiler.py"
+      ],
+      "test_file": "test_compiler.py",
+      "test_cmd": "pytest test_compiler.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t25",
+      "dir_name": "t25_task_scheduler",
+      "description": "实现任务调度器：依赖图、拓扑排序、并行执行、worker管理",
+      "files": [
+        "scheduler.py",
+        "task_graph.py",
+        "test_scheduler.py",
+        "worker.py"
+      ],
+      "test_file": "test_scheduler.py",
+      "test_cmd": "pytest test_scheduler.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t27",
+      "dir_name": "t27_git_objects",
+      "description": "实现Git对象模型：blob/tree/commit对象、引用管理、索引操作",
+      "files": [
+        "git_objects_test.py",
+        "index.py",
+        "objects.py",
+        "refs.py"
+      ],
+      "test_file": "git_objects_test.py",
+      "test_cmd": "pytest git_objects_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t28",
+      "dir_name": "t28_protocol_parser",
+      "description": "实现协议解析器：帧解析、编解码、会话管理",
+      "files": [
+        "codec.py",
+        "frame.py",
+        "protocol_parser_test.py",
+        "session.py"
+      ],
+      "test_file": "protocol_parser_test.py",
+      "test_cmd": "pytest protocol_parser_test.py -v --tb=short",
+      "timeout": 60
+    },
+    {
+      "task_id": "t30",
+      "dir_name": "t30_plugin_system",
+      "description": "实现插件系统：核心框架、加载器、注册表、沙箱隔离",
+      "files": [
+        "core.py",
+        "loader.py",
+        "plugin_system_test.py",
+        "registry.py",
+        "sandbox.py"
+      ],
+      "test_file": "plugin_system_test.py",
+      "test_cmd": "pytest plugin_system_test.py -v --tb=short",
+      "timeout": 60
+    }
+  ]
+}

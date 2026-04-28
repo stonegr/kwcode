@@ -103,6 +103,17 @@ def _rebuild_markdown(project_root: str, stats: dict):
             avg_elapsed = data.get("total_elapsed", 0.0) / count
             lines.append(f"- {task_type}: {count}次全部成功，平均{avg_elapsed:.1f}s")
 
+    # Recent failures section
+    has_failures = any(d.get("recent_failures") for _, d in sorted_types)
+    if has_failures:
+        lines.append("")
+        lines.append("## 近期失败模式")
+        for task_type, data in sorted_types:
+            failures = data.get("recent_failures", [])
+            if failures:
+                for f in failures[-5:]:  # Show last 5 per type in markdown
+                    lines.append(f"- {task_type} {f}")
+
     lines.append("")
 
     path = _md_path(project_root)
@@ -142,12 +153,24 @@ def update(project_root: str, ctx: TaskContext, success: bool, elapsed: float = 
             "success": 0,
             "total_elapsed": 0.0,
             "last_trigger": "",
+            "recent_failures": [],
         }
 
     entry = stats[expert_type]
     entry["count"] += 1
     if success:
         entry["success"] += 1
+    else:
+        # Record failure mode for future reference
+        error_detail = ""
+        if ctx.verifier_output:
+            error_detail = ctx.verifier_output.get("error_detail", "")
+        failure_record = f"[{now}] {error_detail[:100]}"
+        failures = entry.get("recent_failures", [])
+        failures.append(failure_record)
+        # Keep only last 10 failures
+        entry["recent_failures"] = failures[-10:]
+
     entry["total_elapsed"] += elapsed
     entry["last_trigger"] = now
 
@@ -171,6 +194,23 @@ def get_pattern_stats(project_root: str) -> list[dict]:
             "last_trigger": data.get("last_trigger", ""),
         })
     return sorted(result, key=lambda x: x["count"], reverse=True)
+
+
+def count_similar_failures(expert_type: str, keywords: list[str],
+                           project_root: str) -> int:
+    """
+    Count historical failures similar to the given task.
+    Simple keyword match against recent_failures, no LLM call.
+    Used by Planner for risk assessment.
+    """
+    stats = _load_stats(project_root)
+    entry = stats.get(expert_type, {})
+    failures = entry.get("recent_failures", [])
+    count = 0
+    for line in failures:
+        if any(kw in line for kw in keywords if len(kw) > 1):
+            count += 1
+    return count
 
 
 def show(project_root: str) -> str:

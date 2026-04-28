@@ -1,21 +1,38 @@
 """
-KwQode CLI entry point.
-- kwqode              → 进入交互式 REPL
-- kwqode "修复bug"    → 单次执行
-- kwqode init         → 初始化 KAIWU.md
-- kwqode memory       → 查看项目记忆
+KwCode CLI entry point.
+- kwcode              → 进入交互式 REPL
+- kwcode "修复bug"    → 单次执行
+- kwcode init         → 初始化 KAIWU.md
+- kwcode memory       → 查看项目记忆
 """
 
 import logging
 import os
 import sys
 import time
+import warnings
 
 # Windows GBK console encoding fix
 if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    try:
+        if hasattr(sys.stdout, "buffer"):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "buffer"):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # IDE/pipe environments may not support rewrapping
+
+# ── Silence all warnings and logger noise by default ──
+warnings.filterwarnings("ignore")
+from pathlib import Path
+_log_dir = Path.home() / ".kwcode"
+_log_dir.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.FileHandler(_log_dir / "kwcode.log", encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s"))
+logging.getLogger("kaiwu").addHandler(_file_handler)
+logging.getLogger("kaiwu").propagate = False
+logging.getLogger("kaiwu").setLevel(logging.DEBUG)
 
 import typer
 from rich.console import Console
@@ -23,10 +40,11 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 app = typer.Typer(
-    name="kwqode",
-    help="KwQode - 本地模型 coding agent",
+    name="kwcode",
+    help="KwCode - 本地模型 coding agent",
     add_completion=False,
     no_args_is_help=False,
+    invoke_without_command=True,
 )
 expert_app = typer.Typer(name="expert", help="专家管理")
 app.add_typer(expert_app)
@@ -34,8 +52,28 @@ console = Console()
 
 # ── Status display ────────────────────────────────────────────
 
-def _status_callback(stage: str, detail: str):
-    """Rich console status callback for orchestrator."""
+# Spinner stage mapping (internal stage → user-friendly description)
+_SPINNER_STAGES = {
+    "gate": "分析任务...",
+    "locator": "定位代码...",
+    "locator_done": None,  # silent
+    "generator": "生成修改...",
+    "generator_done": None,
+    "verifier": "验证结果...",
+    "verifier_done": None,
+    "search": "搜索增强中...",
+    "search_done": None,
+    "chat": "思考中...",
+    "reflection": "分析失败原因...",
+    "checkpoint": None,
+    "warning": None,
+    "suggest": None,
+    "retry": None,
+}
+
+# Verbose mode: old-style text output (only with --verbose)
+def _verbose_callback(stage: str, detail: str):
+    """Verbose status callback — only used with --verbose flag."""
     colors = {
         "gate": "cyan", "locator": "blue", "locator_done": "green",
         "generator": "blue", "generator_done": "green",
@@ -68,12 +106,30 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     from kaiwu.memory.kaiwu_md import KaiwuMemory
     from kaiwu.registry import ExpertRegistry
     from kaiwu.flywheel.trajectory_collector import TrajectoryCollector
+    from kaiwu.flywheel.ab_tester import ABTester
 
     # 网络探测（首次调用，缓存结果）
     net = detect_network()
     if net["china"]:
         proxy_hint = f"代理: {net['proxy']}" if net["proxy"] else "配置代理可加速: export KAIWU_PROXY=http://..."
         console.print(f"  [yellow][网络] 国内网络，搜索已启用 Bing fallback。{proxy_hint}[/yellow]")
+
+    # SearXNG预检测+自动启动（在pipeline构建时完成，不阻塞用户首次提问）
+    from kaiwu.search.duckduckgo import _searxng_available, _try_start_searxng, _get_searxng_url
+    import kaiwu.search.duckduckgo as _search_mod
+    if _search_mod._searxng_ok is None:
+        searxng_url = _get_searxng_url()
+        if _searxng_available(searxng_url):
+            _search_mod._searxng_ok = True
+            console.print(f"  [green][搜索] SearXNG 就绪[/green]")
+        else:
+            console.print(f"  [yellow][搜索] SearXNG 未就绪，尝试自动启动...[/yellow]")
+            if _try_start_searxng():
+                _search_mod._searxng_ok = True
+                console.print(f"  [green][搜索] SearXNG 已自动启动[/green]")
+            else:
+                _search_mod._searxng_ok = False
+                console.print(f"  [yellow][搜索] SearXNG 不可用，降级到 DuckDuckGo[/yellow]")
 
     llm = LLMBackend(
         model_path=model_path,
@@ -94,16 +150,32 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     generator = GeneratorExpert(llm=llm, tool_executor=tools)
     verifier = VerifierExpert(llm=llm, tool_executor=tools)
     search = SearchAugmentorExpert(llm=llm)
-    office = OfficeHandlerExpert()
+    office = OfficeHandlerExpert(llm=llm, tool_executor=tools)
+
+    from kaiwu.experts.chat_expert import ChatExpert
+    chat_expert = ChatExpert(llm=llm, search_augmentor=search)
 
     trajectory_collector = TrajectoryCollector()
+
+    # ABTester needs orchestrator reference for gate 2 backtest;
+    # we create it first with orchestrator=None, then set it after.
+    ab_tester = ABTester(
+        registry=registry,
+        collector=trajectory_collector,
+        orchestrator=None,
+    )
 
     orchestrator = PipelineOrchestrator(
         locator=locator, generator=generator, verifier=verifier,
         search_augmentor=search, office_handler=office,
         tool_executor=tools, memory=memory, registry=registry,
         trajectory_collector=trajectory_collector,
+        ab_tester=ab_tester,
+        chat_expert=chat_expert,
     )
+    # Wire circular reference: ABTester needs orchestrator for backtest
+    ab_tester.orchestrator = orchestrator
+
     return gate, orchestrator, memory, registry
 
 
@@ -112,75 +184,147 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
 def _run_task(task, gate, orchestrator, memory, project_root, verbose, plan=False, no_search=False):
     """Execute a single task through the pipeline. Returns success bool."""
     from kaiwu.core.orchestrator import EXPERT_SEQUENCES
+    from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    # Gate
-    console.print(f"\n  [cyan]Gate 分析中...[/cyan]")
-    gate_result = gate.classify(task, memory_context=memory.load(project_root))
-
-    if "_parse_error" in gate_result:
-        console.print(f"  [yellow]Gate 解析降级: {gate_result['_parse_error']}[/yellow]")
-
-    et = gate_result["expert_type"]
-    diff = gate_result["difficulty"]
-    summary = gate_result.get("task_summary", "")
-    route = gate_result.get("route_type", "general")
-    expert_name = gate_result.get("expert_name")
-
-    # Use expert's pipeline if from registry, else fall back to orchestrator sequences
-    if route == "expert_registry" and "pipeline" in gate_result:
-        seq = gate_result["pipeline"]
-    else:
-        seq = EXPERT_SEQUENCES.get(et, ["generator", "verifier"])
-    seq_display = " -> ".join(s.capitalize() for s in seq)
-
-    if expert_name:
-        conf = gate_result.get("confidence", 0)
-        console.print(f"  [bold]{expert_name}[/bold] ({route}) conf={conf:.2f}")
-    console.print(f"  [bold]{et}[/bold] | {diff} | {summary}")
-    console.print(f"  [dim]{seq_display}[/dim]")
-
-    # Plan mode confirmation
-    if plan:
-        console.print()
-        confirm = Prompt.ask("  确认执行?", choices=["y", "n"], default="y")
-        if confirm != "y":
-            console.print("  [yellow]已取消[/yellow]")
+    # Gate (with spinner)
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                  transient=True, console=console) as progress:
+        spin = progress.add_task("分析任务...", total=None)
+        try:
+            gate_result = gate.classify(task, memory_context=memory.load(project_root))
+        except Exception as e:
+            progress.stop()
+            console.print(f"\n  [red]模型调用失败：{e}[/red]")
+            console.print("  [dim]请检查模型是否正常运行（ollama list），或用 /model 切换模型[/dim]")
             return False
 
-    # Execute
-    status_fn = _status_callback if verbose else _status_callback  # REPL 模式始终显示进度
-    result = orchestrator.run(
-        user_input=task,
-        gate_result=gate_result,
-        project_root=project_root,
-        on_status=status_fn,
-        no_search=no_search,
-    )
+    et = gate_result.get("expert_type", "chat")
+    diff = gate_result.get("difficulty", "easy")
 
-    # Output
+    # Plan mode (only for high-risk tasks)
+    _SKIP_PLAN_TYPES = {"chat", "office"}
+    should_plan = plan and et not in _SKIP_PLAN_TYPES
+    if should_plan and et == "codegen" and diff == "easy":
+        should_plan = False
+
+    if should_plan:
+        from kaiwu.core.planner import Planner
+        from kaiwu.memory import pattern_md
+        from kaiwu.core.context import TaskContext
+
+        plan_ctx = TaskContext(
+            user_input=task,
+            project_root=project_root,
+            gate_result=gate_result,
+        )
+        planner = Planner(locator=orchestrator.locator, pattern_md_module=pattern_md)
+        steps = planner.generate_plan(plan_ctx)
+        planner.print_plan(steps, console)
+
+        confirm = Prompt.ask("  确认执行?", choices=["y", "n"], default="y")
+        if confirm != "y":
+            console.print("  [yellow]已取消，未修改任何文件[/yellow]")
+            return False
+
+    # Execute with spinner
+    _spinner_state = {"description": "执行中..."}
+
+    def _spinner_callback(stage, detail):
+        label = _SPINNER_STAGES.get(stage)
+        if label:
+            _spinner_state["description"] = label
+        # Verbose mode: also print to console
+        if verbose:
+            _verbose_callback(stage, detail)
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                  transient=True, console=console) as progress:
+        spin = progress.add_task(_spinner_state["description"], total=None)
+
+        # Wrap callback to update spinner
+        def _status_fn(stage, detail):
+            _spinner_callback(stage, detail)
+            progress.update(spin, description=_spinner_state["description"])
+
+        try:
+            result = orchestrator.run(
+                user_input=task,
+                gate_result=gate_result,
+                project_root=project_root,
+                on_status=_status_fn,
+                no_search=no_search,
+            )
+        except Exception as e:
+            progress.stop()
+            console.print(f"\n  [red]执行异常：{e}[/red]")
+            return False
+
+    # ── Output: user-friendly result summary ──
     elapsed = result.get("elapsed", 0)
     if result["success"]:
         ctx = result["context"]
+
+        # Chat: print reply directly
+        if et == "chat":
+            reply = ""
+            if ctx.generator_output:
+                reply = ctx.generator_output.get("explanation", "")
+            console.print(f"\n  {reply}" if reply else
+                          "\n  你好！我是KWCode，专注于代码任务。有什么代码问题需要帮忙吗？")
+            return True
+
+        # Collect file info
         files = []
-        if ctx.locator_output:
-            files = ctx.locator_output.get("relevant_files", [])
-        elif ctx.generator_output:
+        if ctx.generator_output:
             files = [p.get("file", "") for p in ctx.generator_output.get("patches", [])]
-        files_str = ", ".join(files[:5]) if files else "N/A"
+        elif ctx.locator_output:
+            files = ctx.locator_output.get("relevant_files", [])
 
-        console.print(f"\n  [bold green]Done[/bold green] {files_str} ({elapsed:.1f}s)")
+        is_codegen = et == "codegen" and not ctx.locator_output
 
+        # Success header
+        if is_codegen and files:
+            for f in files:
+                full = os.path.join(project_root, f) if not os.path.isabs(f) else f
+                console.print(f"\n  [bold green]✓ 已生成 {full}[/bold green] ({elapsed:.1f}s)")
+        else:
+            files_str = ", ".join(files[:3]) if files else ""
+            if files_str:
+                console.print(f"\n  [bold green]✓ 完成[/bold green] ({elapsed:.1f}s)")
+                for f in files[:3]:
+                    console.print(f"  修改了 {f}")
+            else:
+                console.print(f"\n  [bold green]✓ 完成[/bold green] ({elapsed:.1f}s)")
+
+        # Summary bullets from explanation
         if ctx.generator_output and ctx.generator_output.get("explanation"):
-            console.print(f"  [dim]{ctx.generator_output['explanation'][:200]}[/dim]")
+            explanation = ctx.generator_output["explanation"]
+            # Show concise summary (first 2-3 lines)
+            lines = [l.strip() for l in explanation.split("\n") if l.strip()][:3]
+            for line in lines:
+                console.print(f"    · {line[:60]}")
+
+        # Test results
+        if ctx.verifier_output:
+            passed = ctx.verifier_output.get("tests_passed", 0)
+            total = ctx.verifier_output.get("tests_total", 0)
+            if total > 0:
+                console.print(f"  测试通过 ({passed}/{total})")
+
         return True
     else:
-        error = result.get("error", "Unknown")
-        console.print(f"\n  [bold red]Failed[/bold red] {error} ({elapsed:.1f}s)")
+        # Failure output
+        console.print(f"\n  [bold red]✗ 失败[/bold red] ({elapsed:.1f}s)")
         ctx = result.get("context")
         if ctx and ctx.verifier_output:
             detail = ctx.verifier_output.get("error_detail", "")
             if detail:
-                console.print(f"  [dim]{detail[:200]}[/dim]")
+                # Show first 3 lines of error
+                lines = [l.strip() for l in detail.split("\n") if l.strip()][:3]
+                console.print(f"  原因：")
+                for line in lines:
+                    console.print(f"    {line[:80]}")
+        # Show downgrade suggestion if available (from orchestrator)
         return False
 
 
@@ -189,25 +333,58 @@ def _run_task(task, gate, orchestrator, memory, project_root, verbose, plan=Fals
 REPL_COMMANDS = {
     "/help":    "显示帮助",
     "/memory":  "查看项目记忆 (KAIWU.md)",
-    "/init":    "初始化 KAIWU.md",
+    "/init":    "初始化 KWCODE.md + KAIWU.md",
     "/model":   "切换模型 (用法: /model qwen3-8b)",
     "/cd":      "切换项目目录 (用法: /cd /path/to/project)",
     "/experts": "列出已注册专家",
-    "/plan":    "下一个任务先显示计划再执行",
+    "/plan":    "计划模式 (用法: /plan <任务> 或 /plan 后输入任务)",
+    "/api":     "API配置 (用法: /api show | /api temp <url> | /api default <url>)",
     "/exit":    "退出",
 }
 
 
-def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
-    """Interactive REPL loop."""
-    from kaiwu.memory.kaiwu_md import KaiwuMemory
+VERSION = "0.7.0"
 
-    console.print(Panel(
-        f"[bold]KwQode v0.4[/bold]  交互模式\n"
-        f"模型: {ollama_model}  项目: {project_root}\n"
-        f"输入任务开始，/help 查看命令，/exit 退出",
-        border_style="cyan",
-    ))
+# ── Shadow/重影大字 KAIWU ──
+_KAIWU_SHADOW = [
+    "  [bold white]██╗  ██╗ █████╗ ██╗██╗    ██╗██╗   ██╗[/bold white]",
+    "  [bold white]██║ ██╔╝██╔══██╗██║██║    ██║██║   ██║[/bold white]",
+    "  [bold white]█████╔╝ ███████║██║██║ █╗ ██║██║   ██║[/bold white]",
+    "  [bold white]██╔═██╗ ██╔══██║██║██║███╗██║██║   ██║[/bold white]",
+    "  [bold white]██║  ██╗██║  ██║██║╚███╔███╔╝╚██████╔╝[/bold white]",
+    "  [bold white]╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚══╝╚══╝  ╚═════╝[/bold white]",
+]
+
+
+def _render_header(model: str, project_root: str, registry=None):
+    """启动Header：重影大字 KAIWU + 简洁信息行。"""
+    short = project_root.replace(os.path.expanduser("~"), "~")
+    if len(short) > 35:
+        short = "..." + short[-32:]
+
+    expert_count = len(registry.experts) if registry and hasattr(registry, 'experts') else 0
+
+    console.print()
+    for line in _KAIWU_SHADOW:
+        console.print(line)
+    console.print(f"  [dim]天工开物  v{VERSION}[/dim]")
+    console.print("  " + "─" * min(console.width - 4, 50))
+    console.print(
+        f"  [green]{model}[/green]  ·  [cyan]{short}[/cyan]  ·  "
+        f"[dim]{expert_count} 专家[/dim]"
+    )
+    console.print()
+
+
+def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
+    """Interactive REPL loop with prompt_toolkit bottom_toolbar."""
+    from kaiwu.memory.kaiwu_md import KaiwuMemory
+    from kaiwu.core.sysinfo import get_sysinfo, VRAMWatcher
+    from kaiwu.core.context_pruner import ContextPruner
+    from kaiwu.cli.status_bar import StatusBar, TokPerSecEstimator
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.completion import Completer, Completion
 
     gate, orchestrator, memory, registry = _build_pipeline(
         model_path=model_path,
@@ -217,13 +394,89 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
         verbose=verbose,
     )
 
+    # P2: Model capability detection
+    from kaiwu.core.model_capability import detect_model_tier, get_strategy, tier_display_name
+    model_tier = detect_model_tier(ollama_model, ollama_url)
+    model_strategy = get_strategy(model_tier)
+    orchestrator._model_name = ollama_model
+
+    # P2: Flywheel notifier
+    from kaiwu.notification.flywheel_notifier import FlywheelNotifier
+    notifier = FlywheelNotifier()
+
+    # Hardware info (once at startup)
+    sysinfo = get_sysinfo()
+
+    # Render header
+    _render_header(ollama_model, project_root, registry)
+
+    # P2: Show model tier info
+    tier_name = tier_display_name(model_tier)
+    if model_tier.value == "small":
+        console.print(
+            f"  [yellow][{tier_name}][/yellow] "
+            f"已启用计划确认 · 任务范围≤{model_strategy.max_files_per_task}文件 · "
+            f"第{model_strategy.search_trigger_after}次失败触发搜索"
+        )
+    elif model_tier.value == "large":
+        console.print(f"  [green][{tier_name}][/green] 允许更大范围任务")
+
+    # P2: Weekly stats hint
+    _maybe_show_weekly_stats(console)
+
+    # Init status bar
+    status = StatusBar()
+    status.model = ollama_model
+    status.ctx_max = 8192
+    status.vram_used = sysinfo.vram_used_gb
+    status.vram_total = sysinfo.vram_total_gb
+    status.ram_used = sysinfo.ram_used_gb
+    status.ram_total = sysinfo.ram_total_gb
+
+    tps_estimator = TokPerSecEstimator()
+    pruner = ContextPruner(max_tokens=status.ctx_max)
+    conversation_history: list[dict] = []
+
+    # Background VRAM watcher
+    vram_watcher = VRAMWatcher(status)
+    vram_watcher.start()
+
+    # prompt_toolkit session with bottom_toolbar
+    from prompt_toolkit.styles import Style as PTStyle
+    _pt_style = PTStyle.from_dict({
+        'bottom-toolbar': 'bg:#1a1a1a #666666 noreverse',
+    })
+
+    def _toolbar():
+        status.refresh_ram()
+        width = console.width
+        bar = _escape_html(status.render(width))
+        return HTML(f'<style bg="#1a1a1a" fg="#666666">{bar}</style>')
+
+    # Slash command completer — 输入/后弹出命令菜单
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor.lstrip()
+            if not text.startswith("/"):
+                return
+            for cmd, desc in REPL_COMMANDS.items():
+                if cmd.startswith(text):
+                    yield Completion(cmd, start_position=-len(text), display_meta=desc)
+
+    session = PromptSession(completer=SlashCompleter(), style=_pt_style)
+
     plan_next = False
     task_count = 0
 
     while True:
+        # P2-RED-2: Show pending flywheel notifications before next task
+        notifier.flush(console)
+
         try:
-            console.print()
-            user_input = Prompt.ask("[bold cyan]kwqode[/bold cyan]").strip()
+            user_input = session.prompt(
+                " > ",
+                bottom_toolbar=_toolbar,
+            ).strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n  [dim]bye[/dim]")
             break
@@ -250,8 +503,13 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                 console.print(Panel(content, title="KAIWU.md", border_style="blue"))
 
             elif cmd == "/init":
-                result = memory.init(project_root)
+                # Generate KWCODE.md template
+                from kaiwu.core.kwcode_md import generate_kwcode_template
+                result = generate_kwcode_template(project_root)
                 console.print(f"  {result}")
+                # Also init KAIWU.md if needed
+                result2 = memory.init(project_root)
+                console.print(f"  {result2}")
 
             elif cmd == "/model":
                 if not arg:
@@ -268,6 +526,13 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                         project_root=project_root,
                         verbose=verbose,
                     )
+                    status.model = ollama_model
+                    # 持久化到config，下次启动自动用新模型
+                    from kaiwu.cli.onboarding import load_config, _save_config
+                    cfg = load_config()
+                    cfg.setdefault("default", {})
+                    cfg["default"]["model"] = ollama_model
+                    _save_config(cfg)
 
             elif cmd == "/cd":
                 if not arg:
@@ -301,8 +566,39 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                     console.print(f"  [bold]{e['name']}[/bold] [{lc}] tasks={cnt} sr={sr:.0%} kw=[{kws}]")
 
             elif cmd == "/plan":
-                plan_next = True
-                console.print("  [dim]下一个任务将先显示计划[/dim]")
+                if arg:
+                    # /plan <任务描述> → 直接以plan模式执行
+                    task_count += 1
+                    conversation_history.append({"role": "user", "content": arg})
+                    t0 = time.perf_counter()
+                    success = _run_task(
+                        task=arg, gate=gate, orchestrator=orchestrator,
+                        memory=memory, project_root=project_root,
+                        verbose=verbose, plan=True, no_search=False,
+                    )
+                    elapsed = time.perf_counter() - t0
+                    tps_estimator.record("x" * int(elapsed * 15), elapsed)
+                    status.tok_per_sec = tps_estimator.value
+                    conversation_history.append({"role": "assistant", "content": arg[:500]})
+                    status.ctx_used = pruner.estimate_total(conversation_history)
+                else:
+                    plan_next = True
+                    console.print("  [dim]下一个任务将先显示计划[/dim]")
+
+            elif cmd == "/api":
+                api_parts = user_input.split()
+                result = _handle_api_command(api_parts, ollama_url, ollama_model)
+                if result:
+                    # /api temp or /api default changed the URL, rebuild pipeline
+                    ollama_url = result.get("url", ollama_url)
+                    gate, orchestrator, memory, registry = _build_pipeline(
+                        model_path=model_path,
+                        ollama_url=ollama_url,
+                        ollama_model=ollama_model,
+                        project_root=project_root,
+                        verbose=verbose,
+                    )
+                    status.model = ollama_model
 
             else:
                 console.print(f"  [yellow]未知命令: {cmd}[/yellow]  输入 /help 查看帮助")
@@ -311,6 +607,22 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
 
         # ── Execute task ──
         task_count += 1
+
+        # Track conversation for context pruning
+        conversation_history.append({"role": "user", "content": user_input})
+
+        # Check if context needs pruning before task
+        if pruner.needs_pruning(conversation_history):
+            conversation_history = pruner.prune(conversation_history)
+            status.compress_count = pruner.compress_count
+            console.print(
+                f"  [dim]context已压缩（第{pruner.compress_count}次，"
+                f"耗时{pruner._last_compress_ms:.1f}ms）[/dim]"
+            )
+
+        t0 = time.perf_counter()
+        # P2: Small model forces plan mode
+        effective_plan = plan_next or model_strategy.force_plan_mode
         success = _run_task(
             task=user_input,
             gate=gate,
@@ -318,19 +630,114 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
             memory=memory,
             project_root=project_root,
             verbose=verbose,
-            plan=plan_next,
+            plan=effective_plan,
             no_search=False,
         )
+        elapsed = time.perf_counter() - t0
         plan_next = False  # Reset plan flag
 
-        if success:
-            console.print(f"  [dim]#{task_count} 完成[/dim]")
+        # Update tok/s estimator (rough: use elapsed as proxy)
+        tps_estimator.record("x" * int(elapsed * 15), elapsed)  # ~15 tok/s estimate
+        status.tok_per_sec = tps_estimator.value
+
+        # Update ctx usage with real LLM output
+        conversation_history.append({"role": "assistant", "content": user_input[:500]})
+        status.ctx_used = pruner.estimate_total(conversation_history)
+        status.model = ollama_model
+
+    # Cleanup
+    vram_watcher.stop()
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special chars for prompt_toolkit HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _maybe_show_weekly_stats(console):
+    """Show weekly stats hint at startup (once per 7 days). P2-FLEX-3: skip if <5 tasks."""
+    import time as _time
+    from pathlib import Path as _Path
+    last_shown_path = _Path.home() / ".kwcode" / "last_stats_shown.txt"
+    now = _time.time()
+
+    if last_shown_path.exists():
+        try:
+            last = float(last_shown_path.read_text().strip())
+            if now - last < 7 * 86400:
+                return
+        except (ValueError, OSError):
+            pass
+
+    try:
+        from kaiwu.stats.value_tracker import ValueTracker
+        tracker = ValueTracker()
+        summary = tracker.get_summary(days=7)
+        if summary["total_tasks"] >= 5:
+            console.print(
+                f"  [dim]本周：完成 {summary['total_tasks']} 个任务 · "
+                f"节省约 {summary['time_saved_hours']} 小时[/dim]"
+            )
+            last_shown_path.parent.mkdir(parents=True, exist_ok=True)
+            last_shown_path.write_text(str(now))
+    except Exception:
+        pass
+
+
+# ── /api command handler ─────────────────────────────────────
+
+def _handle_api_command(parts: list[str], current_url: str, current_model: str):
+    """Handle /api show | /api temp <url> [key] | /api default <url> [key].
+    Returns {"url": new_url} if pipeline needs rebuild, None otherwise."""
+    from kaiwu.cli.onboarding import load_config, _verify_api, _save_config, CONFIG_PATH
+
+    if len(parts) < 2 or parts[1] == "show":
+        cfg = load_config().get("default", {})
+        console.print(f"  Base URL : {cfg.get('base_url', current_url)}")
+        console.print(f"  Model    : {cfg.get('model', current_model)}")
+        key = cfg.get("api_key", "")
+        console.print(f"  API Key  : {'*' * min(len(key), 8) + '...' if key else '（无）'}")
+        return None
+
+    sub = parts[1]
+    if sub not in ("temp", "default"):
+        console.print("  [red]未知子命令[/red]，用法: /api show | /api temp <url> | /api default <url>")
+        return None
+
+    if len(parts) < 3:
+        console.print("  [red]缺少URL参数[/red]，例: /api temp http://localhost:11434")
+        return None
+
+    new_url = parts[2].rstrip("/")
+    new_key = parts[3] if len(parts) > 3 else ""
+
+    # Verify
+    ok, err = _verify_api(new_url, new_key, current_model)
+    if ok:
+        console.print(f"  [green]✓ 已切换到 {new_url}[/green]")
+    else:
+        console.print(f"  [yellow]⚠ 连接验证失败：{err}[/yellow]")
+
+    if sub == "default":
+        config = load_config()
+        config.setdefault("default", {})
+        config["default"]["base_url"] = new_url
+        if new_key:
+            config["default"]["api_key"] = new_key
+        _save_config(config)
+        console.print("  [dim]已写入默认配置并重建流水线[/dim]")
+    else:
+        console.print("  [dim]临时切换，当前窗口有效[/dim]")
+
+    # Signal caller to rebuild pipeline with new URL
+    return {"url": new_url}
 
 
 # ── Typer commands ────────────────────────────────────────────
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     task: str = typer.Argument(None, help="任务描述。不提供则进入交互模式"),
     plan: bool = typer.Option(False, "--plan", "-p", help="先输出计划，确认后执行"),
     model: str = typer.Option(None, "--model", "-m", help="Ollama模型名称 (默认 qwen3-8b)"),
@@ -342,19 +749,26 @@ def main(
     do_init: bool = typer.Option(False, "--init", help="初始化KAIWU.md"),
     show_memory: bool = typer.Option(False, "--memory", help="查看项目记忆"),
 ):
-    """KwQode - 本地模型 coding agent。无参数进入交互模式。"""
+    """KwCode - 本地模型 coding agent。无参数进入交互模式。"""
+
+    # If a subcommand (init/memory/expert) is being invoked, skip main logic
+    if ctx.invoked_subcommand is not None:
+        return
 
     log_level = logging.DEBUG if verbose else logging.WARNING
-    logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
+    if verbose:
+        logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
+        logging.getLogger("kaiwu").propagate = True
 
     project_root = os.path.abspath(project_dir)
     ollama_model = model or "qwen3-8b"
 
     # ── Subcommands ──
     if do_init:
+        from kaiwu.core.kwcode_md import generate_kwcode_template
+        console.print(f"  {generate_kwcode_template(project_root)}")
         from kaiwu.memory.kaiwu_md import KaiwuMemory
-        mem = KaiwuMemory()
-        console.print(mem.init(project_root))
+        console.print(KaiwuMemory().init(project_root))
         return
 
     if show_memory:
@@ -362,6 +776,20 @@ def main(
         mem = KaiwuMemory()
         console.print(Panel(mem.show(project_root), title="KAIWU.md", border_style="blue"))
         return
+
+    # ── First-run onboarding (BOOT-RED-1) ──
+    from kaiwu.cli.onboarding import is_first_run, run_onboarding, load_config
+
+    config = load_config()
+    if is_first_run():
+        config = run_onboarding()
+
+    # Use config values as defaults (CLI flags override)
+    default_cfg = config.get("default", {})
+    if not model and default_cfg.get("model"):
+        ollama_model = default_cfg["model"]
+    if ollama_url == "http://localhost:11434" and default_cfg.get("base_url"):
+        ollama_url = default_cfg["base_url"]
 
     # ── No task → REPL mode ──
     if not task:
@@ -376,7 +804,7 @@ def main(
 
     # ── Single task mode ──
     console.print(Panel(
-        f"[bold]KwQode v0.4[/bold] | {ollama_model} | {project_root}",
+        f"[bold]KW-CODE v{VERSION}[/bold] | {ollama_model} | {project_root}",
         border_style="cyan",
     ))
 
@@ -397,9 +825,12 @@ def main(
 def cmd_init(
     project_dir: str = typer.Option(".", "--project", "-d", help="项目根目录"),
 ):
-    """初始化 KAIWU.md 项目记忆文件。"""
+    """初始化 KWCODE.md + KAIWU.md 项目文件。"""
+    project_root = os.path.abspath(project_dir)
+    from kaiwu.core.kwcode_md import generate_kwcode_template
+    console.print(f"  {generate_kwcode_template(project_root)}")
     from kaiwu.memory.kaiwu_md import KaiwuMemory
-    console.print(KaiwuMemory().init(os.path.abspath(project_dir)))
+    console.print(KaiwuMemory().init(project_root))
 
 
 @app.command("memory")
@@ -568,10 +999,52 @@ def cmd_status(
         f"模型: {ollama_model}  Ollama: {'[green]连接正常[/green]' if ollama_ok else '[red]无法连接[/red]'} ({ollama_url})\n"
         f"专家: {len(builtin)} builtin + {len(custom)} custom = {len(experts)} total\n"
         f"项目: {project_root}\n"
-        f"记忆: {'[green]KAIWU.md 已初始化[/green]' if has_memory else '[yellow]未初始化 (kwqode init)[/yellow]'}",
-        title="KwQode Status",
+        f"记忆: {'[green]KAIWU.md 已初始化[/green]' if has_memory else '[yellow]未初始化 (kwcode init)[/yellow]'}",
+        title="KwCode Status",
         border_style="cyan",
     ))
+
+
+# ── Stats command ───────────────────────────────────────────
+
+@app.command("stats")
+def cmd_stats(
+    days: int = typer.Option(30, help="统计天数"),
+):
+    """查看KWCode价值报告。"""
+    from kaiwu.stats.value_tracker import ValueTracker
+
+    tracker = ValueTracker()
+    summary = tracker.get_summary(days=days)
+
+    # P2-FLEX-3: not enough data
+    if summary["total_tasks"] < 5:
+        console.print(
+            f"  [dim]数据积累中（已完成{summary['total_tasks']}个任务），"
+            f"积累更多任务后显示报告[/dim]"
+        )
+        return
+
+    console.print()
+    console.print(f"  [bold]KWCode 价值报告[/bold]  过去{days}天")
+    console.print("  " + "─" * 45)
+    console.print(f"  完成任务        {summary['total_tasks']} 个")
+    console.print(f"  成功任务        {summary['succeeded_tasks']} 个")
+
+    if summary["time_saved_hours"] > 0:
+        console.print(f"  节省时间        约 {summary['time_saved_hours']} 小时")
+
+    if summary["top_expert_name"]:
+        console.print()
+        console.print(
+            f"  最活跃专家      {summary['top_expert_name']}"
+            f"  ·  {summary['top_expert_count']}次"
+            f"  ·  成功率 {summary['top_expert_rate']*100:.0f}%"
+        )
+
+    console.print()
+    console.print("  [dim]数据仅存本地，不上报任何服务器[/dim]")
+    console.print()
 
 
 # ── MCP serve command ────────────────────────────────────────
@@ -592,7 +1065,9 @@ def cmd_serve_mcp(
     ollama_model = model or "qwen3-8b"
 
     log_level = logging.DEBUG if verbose else logging.WARNING
-    logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
+    if verbose:
+        logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
+        logging.getLogger("kaiwu").propagate = True
 
     gate, orchestrator, memory, _reg = _build_pipeline(
         model_path=model_path,
@@ -604,6 +1079,198 @@ def cmd_serve_mcp(
 
     mcp = KaiwuMCP(gate=gate, orchestrator=orchestrator, memory=memory, project_root=project_root)
     _asyncio.run(mcp.run_stdio())
+
+
+# ── Checkpoint commands ─────────────────────────────────────
+
+checkpoint_app = typer.Typer(name="checkpoint", help="文件快照管理")
+app.add_typer(checkpoint_app)
+
+
+@checkpoint_app.command("list")
+def checkpoint_list():
+    """查看所有快照。"""
+    from kaiwu.core.checkpoint import list_checkpoints
+    items = list_checkpoints()
+    if not items:
+        console.print("  没有快照记录")
+        return
+    console.print(f"  [cyan]快照: {len(items)}[/cyan]")
+    for item in items:
+        console.print(f"  {item['name']}  {item['created']}  {item['files']}个文件")
+
+
+@checkpoint_app.command("restore")
+def checkpoint_restore():
+    """还原到最近快照。"""
+    from kaiwu.core.checkpoint import restore_latest
+    if restore_latest():
+        console.print("  [green]✓ 已还原到最近快照[/green]")
+    else:
+        console.print("  [red]没有可用的快照[/red]")
+
+
+# ── Search setup command ────────────────────────────────────
+
+@app.command("setup-search")
+def cmd_setup_search():
+    """一键安装 SearXNG 搜索引擎（需要 Docker）。"""
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    import subprocess
+
+    console.print()
+    console.print("  [bold]SearXNG 搜索引擎安装[/bold]")
+    console.print("  " + "─" * 40)
+    console.print()
+    console.print("  SearXNG 是本地多引擎聚合搜索，安装后搜索质量大幅提升。")
+    console.print("  需要：Docker Desktop 已安装并运行")
+    console.print()
+
+    # Step 1: Check Docker
+    console.print("  [cyan]1/4[/cyan] 检查 Docker...")
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10, text=True)
+        if r.returncode != 0:
+            console.print("  [red]✗ Docker 未运行[/red]")
+            console.print("  请先启动 Docker Desktop，然后重新运行 kwcode setup-search")
+            return
+        console.print("  [green]✓ Docker 就绪[/green]")
+    except FileNotFoundError:
+        console.print("  [red]✗ Docker 未安装[/red]")
+        console.print()
+        console.print("  安装 Docker Desktop：")
+        console.print("    Windows: https://docs.docker.com/desktop/install/windows-install/")
+        console.print("    Mac:     https://docs.docker.com/desktop/install/mac-install/")
+        console.print("    Linux:   sudo apt install docker.io && sudo systemctl start docker")
+        console.print()
+        console.print("  安装后重新运行 [bold]kwcode setup-search[/bold]")
+        return
+    except subprocess.TimeoutExpired:
+        console.print("  [red]✗ Docker 响应超时[/red]")
+        return
+
+    container_name = "kwcode-searxng"
+
+    # Step 2: Check if container already exists
+    console.print("  [cyan]2/4[/cyan] 检查现有容器...")
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name=^{container_name}$", "--format", "{{.Status}}"],
+            capture_output=True, timeout=5, text=True,
+        )
+        status = r.stdout.strip()
+        if status and "Up" in status:
+            console.print("  [green]✓ SearXNG 已在运行[/green]")
+            _verify_searxng_json(container_name)
+            console.print()
+            console.print("  [bold green]安装完成！[/bold green] 搜索引擎已就绪。")
+            return
+        elif status:
+            console.print("  [yellow]容器已存在但未运行，正在启动...[/yellow]")
+            subprocess.run(["docker", "start", container_name], capture_output=True, timeout=15)
+        else:
+            # Step 3: Pull and run
+            console.print("  [cyan]3/4[/cyan] 拉取 SearXNG 镜像（首次约 200MB）...")
+            with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                          transient=True, console=console) as progress:
+                progress.add_task("拉取镜像中...", total=None)
+                r = subprocess.run(
+                    ["docker", "pull", "searxng/searxng"],
+                    capture_output=True, timeout=300, text=True,
+                )
+            if r.returncode != 0:
+                console.print(f"  [red]✗ 镜像拉取失败[/red]")
+                console.print(f"  [dim]{r.stderr[:200]}[/dim]")
+                return
+            console.print("  [green]✓ 镜像就绪[/green]")
+
+            console.print("  [cyan]4/4[/cyan] 启动容器...")
+            r = subprocess.run(
+                ["docker", "run", "-d",
+                 "--name", container_name,
+                 "--restart", "always",
+                 "-p", "8080:8080",
+                 "searxng/searxng"],
+                capture_output=True, timeout=30, text=True,
+            )
+            if r.returncode != 0:
+                console.print(f"  [red]✗ 容器启动失败[/red]")
+                console.print(f"  [dim]{r.stderr[:200]}[/dim]")
+                return
+    except subprocess.TimeoutExpired:
+        console.print("  [red]✗ 操作超时[/red]")
+        return
+    except Exception as e:
+        console.print(f"  [red]✗ 错误：{e}[/red]")
+        return
+
+    # Wait for ready
+    import httpx as _httpx
+    console.print("  等待 SearXNG 就绪...")
+    for i in range(15):
+        import time as _t
+        _t.sleep(1)
+        try:
+            resp = _httpx.get("http://localhost:8080/healthz", timeout=2)
+            if resp.status_code == 200:
+                break
+        except Exception:
+            pass
+    else:
+        console.print("  [yellow]⚠ SearXNG 启动较慢，可能需要等待几秒[/yellow]")
+
+    # Enable JSON format
+    _verify_searxng_json(container_name)
+
+    console.print()
+    console.print("  [bold green]安装完成！[/bold green]")
+    console.print("  SearXNG 运行在 http://localhost:8080")
+    console.print("  kwcode 启动时会自动检测并使用。")
+    console.print()
+    console.print("  [dim]管理命令：[/dim]")
+    console.print("  [dim]  停止：docker stop kwcode-searxng[/dim]")
+    console.print("  [dim]  启动：docker start kwcode-searxng[/dim]")
+    console.print("  [dim]  卸载：docker rm -f kwcode-searxng[/dim]")
+
+
+def _verify_searxng_json(container_name: str):
+    """确保 SearXNG 启用了 JSON 输出格式。"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["docker", "exec", container_name,
+             "grep", "-c", "json", "/etc/searxng/settings.yml"],
+            capture_output=True, timeout=5, text=True,
+        )
+        if r.returncode == 0 and int(r.stdout.strip() or "0") > 0:
+            console.print("  [green]✓ JSON 格式已启用[/green]")
+            return
+
+        # Add json format
+        subprocess.run(
+            ["docker", "exec", container_name,
+             "sed", "-i", r"s/^    - html$/    - html\n    - json/",
+             "/etc/searxng/settings.yml"],
+            capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["docker", "restart", container_name],
+            capture_output=True, timeout=15,
+        )
+        # Wait for restart
+        import time as _t
+        for _ in range(8):
+            _t.sleep(1)
+            try:
+                import httpx as _hx
+                resp = _hx.get("http://localhost:8080/healthz", timeout=2)
+                if resp.status_code == 200:
+                    break
+            except Exception:
+                pass
+        console.print("  [green]✓ JSON 格式已启用（已重启容器）[/green]")
+    except Exception:
+        console.print("  [yellow]⚠ 无法验证 JSON 格式，搜索可能降级到 DDG[/yellow]")
 
 
 if __name__ == "__main__":

@@ -118,6 +118,10 @@ class ToolExecutor:
 
     def apply_patch(self, file_path: str, original: str, modified: str) -> bool:
         """Apply a text replacement patch. Exact match only — original is read from file."""
+        if not original:
+            # Empty original means codegen (new file) — should use write_file instead
+            logger.warning("apply_patch called with empty original, use write_file for new files")
+            return False
         full = self._resolve(file_path)
         try:
             content = self.read_file(file_path)

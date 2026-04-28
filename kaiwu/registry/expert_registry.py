@@ -76,7 +76,7 @@ class ExpertRegistry:
 
             # Saturating confidence: 1 - 0.5^matched
             confidence = 1.0 - (0.5 ** matched)
-            threshold = expert["trigger_min_confidence"] + penalty
+            threshold = min(1.0, expert["trigger_min_confidence"] + penalty)
 
             if confidence < threshold:
                 continue

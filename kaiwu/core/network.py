@@ -27,24 +27,30 @@ def get_proxy() -> Optional[str]:
     从环境变量或 config 读取代理地址。
     优先级：KAIWU_PROXY > HTTPS_PROXY > HTTP_PROXY > ~/.kaiwu/config.yaml
     """
-    for var in ("KAIWU_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
-                "kaiwu_proxy", "https_proxy", "http_proxy"):
+    for var in ("KWCODE_PROXY", "KAIWU_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
+                "kwcode_proxy", "kaiwu_proxy", "https_proxy", "http_proxy"):
         val = os.environ.get(var)
         if val:
             return val
 
-    # Try ~/.kaiwu/config.yaml
-    config_path = os.path.join(Path.home(), ".kaiwu", "config.yaml")
-    if os.path.exists(config_path):
-        try:
-            import yaml
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            proxy = cfg.get("proxy")
-            if proxy:
-                return proxy
-        except Exception:
-            pass
+    # Try ~/.kwcode/config.yaml first, then legacy ~/.kaiwu/config.yaml
+    for dirname in (".kwcode", ".kaiwu"):
+        config_path = os.path.join(Path.home(), dirname, "config.yaml")
+        if os.path.exists(config_path):
+            try:
+                import yaml
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                proxy = cfg.get("proxy")
+                if not proxy:
+                    # Also check nested default.proxy
+                    default = cfg.get("default", {})
+                    if isinstance(default, dict):
+                        proxy = default.get("proxy")
+                if proxy:
+                    return proxy
+            except Exception:
+                pass
 
     return None
 

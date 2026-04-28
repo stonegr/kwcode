@@ -65,7 +65,10 @@ class ExpertPackager:
             if "expert.yaml" not in names:
                 raise ValueError("Invalid .kwx package: missing expert.yaml")
 
-            yaml_content = zf.read("expert.yaml").decode("utf-8")
+            try:
+                yaml_content = zf.read("expert.yaml").decode("utf-8")
+            except UnicodeDecodeError as e:
+                raise ValueError(f"Invalid .kwx package: expert.yaml is not valid UTF-8: {e}")
             expert_def = yaml.safe_load(yaml_content)
 
             valid, err = ExpertLoader.validate(expert_def)

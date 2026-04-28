@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_FIELDS = {"name", "version", "type", "trigger_keywords", "trigger_min_confidence", "system_prompt", "pipeline"}
 VALID_LIFECYCLES = {"new", "mature", "declining", "archived"}
-VALID_PIPELINE_STEPS = {"locator", "generator", "verifier"}
+VALID_PIPELINE_STEPS = {"locator", "generator", "verifier", "office", "chat"}
 
 
 class ExpertLoader:
