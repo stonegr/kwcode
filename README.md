@@ -215,33 +215,42 @@ KWCode 是全球唯一针对本地小模型能力差异做自适应的 coding ag
 ### 系统要求
 
 - Python 3.10+
-- [Ollama](https://ollama.com/download)（模型运行环境）
+- 任意 OpenAI 兼容 API（本地 Ollama / DeepSeek / 硅基流动 / Qwen 云端 等）
 - Docker（可选，用于 SearXNG 搜索增强）
+
+| 使用方式 | 说明 |
+|---------|------|
+| 本地模型 | 安装 [Ollama](https://ollama.com/download)，拉取 qwen3:8b 等模型 |
+| 云端 API | `/api default https://api.deepseek.com your-key`，无需本地显卡 |
+
+本地模型显存参考：
 
 | 显存 | 推荐模型 |
 |------|---------|
 | 4GB | gemma3:4b |
-| 8GB | **qwen3:8b（推荐）** |
+| 8GB | qwen3:8b |
 | 16GB | qwen3:14b |
 | 24GB+ | qwen3:30b-a3b |
 
 ### 安装
 
 ```bash
-# 1. 安装 Ollama 并拉取模型
-ollama pull qwen3:8b
-
-# 2. 安装 KWCode
+# 安装 KWCode
 pip install kwcode
 
 # 国内加速：
 pip install kwcode -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 3. 启动
+# 启动
 kwcode
 ```
 
 首次启动会引导你配置模型连接，按提示操作即可。
+
+用云端 API 不需要本地显卡：
+```
+/api default https://api.deepseek.com your-api-key
+```
 
 ### 可选：安装搜索增强
 
