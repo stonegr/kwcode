@@ -353,8 +353,9 @@ class GeneratorExpert:
         elif strategy == 1:
             error = ctx.previous_failure or "验证失败"
             reflection_line = f"\n失败分析：{ctx.reflection}" if ctx.reflection else ""
+            debug_line = f"\n运行时调试信息：{ctx.debug_info}" if ctx.debug_info else ""
             return (
-                f"上次修改失败了。错误信息：\n{error[:500]}{reflection_line}\n\n"
+                f"上次修改失败了。错误信息：\n{error[:500]}{reflection_line}{debug_line}\n\n"
                 f"原始代码（来自 {fpath}）：\n```\n{original}\n```\n\n"
                 f"{search_line}"
                 f"直接修复这个错误。只输出修改后的完整函数代码，不要解释。"
@@ -363,8 +364,9 @@ class GeneratorExpert:
         else:
             error = ctx.previous_failure or "验证失败"
             reflection_line = f"\n上次失败原因：{ctx.reflection}" if ctx.reflection else ""
+            debug_line = f"\n运行时调试信息：{ctx.debug_info}" if ctx.debug_info else ""
             return (
-                f"只修改以下代码的最小必要部分，其他代码一行都不要动。{reflection_line}\n\n"
+                f"只修改以下代码的最小必要部分，其他代码一行都不要动。{reflection_line}{debug_line}\n\n"
                 f"需要修复的错误：{error[:300]}\n\n"
                 f"原始代码（来自 {fpath}）：\n```\n{original}\n```\n\n"
                 f"{search_line}"

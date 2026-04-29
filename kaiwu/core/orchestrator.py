@@ -57,6 +57,7 @@ class PipelineOrchestrator:
         trajectory_collector: TrajectoryCollector | None = None,
         ab_tester: ABTester | None = None,
         chat_expert: ChatExpert | None = None,
+        debug_subagent=None,
     ):
         self.locator = locator
         self.generator = generator
@@ -70,6 +71,7 @@ class PipelineOrchestrator:
         self.trajectory_collector = trajectory_collector
         self._pattern_detector = PatternDetector(trajectory_collector) if trajectory_collector else None
         self.ab_tester = ab_tester
+        self.debug_subagent = debug_subagent
         self._value_tracker = ValueTracker()
         self._notifier = FlywheelNotifier()
 
@@ -225,6 +227,10 @@ class PipelineOrchestrator:
             # Reflection before 2nd retry: ask LLM why the patch failed
             if ctx.retry_count == 1 and ctx.verifier_output and ctx.generator_output:
                 self._do_reflection(ctx, on_status)
+
+            # Debug Subagent: capture runtime info on failure (test failures only)
+            if ctx.retry_count >= 1 and ctx.verifier_output:
+                self._do_debug(ctx, on_status)
 
             # Set retry strategy: each retry uses a different approach
             ctx.retry_strategy = ctx.retry_count  # 0→1→2
@@ -404,6 +410,21 @@ class PipelineOrchestrator:
             self._emit(on_status, "reflection", f"反思：{ctx.reflection[:80]}")
         except Exception as e:
             logger.debug("Reflection failed (non-blocking): %s", e)
+
+    def _do_debug(self, ctx: TaskContext, on_status):
+        """Debug Subagent: capture runtime info after test failure (non-blocking)."""
+        if not self.debug_subagent:
+            return
+        try:
+            self._emit(on_status, "debug", "调试子代理：采集运行时信息...")
+            debug_info = self.debug_subagent.investigate(ctx)
+            if debug_info:
+                ctx.debug_info = debug_info
+                self._emit(on_status, "debug_done", f"调试信息：{debug_info[:80]}")
+            else:
+                self._emit(on_status, "debug_done", "未获取到额外调试信息")
+        except Exception as e:
+            logger.debug("Debug subagent failed (non-blocking): %s", e)
 
     @staticmethod
     def _emit(callback, stage: str, detail: str):

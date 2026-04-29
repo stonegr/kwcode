@@ -47,5 +47,8 @@ class TaskContext:
     # Document context (populated by DocReader via Locator)
     doc_context: str = ""
 
+    # Debug Subagent output (populated by orchestrator on retry)
+    debug_info: str = ""
+
     # KWCODE.md injected rules (populated by orchestrator)
     kwcode_rules: str = ""
